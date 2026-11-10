@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dwarpal"
+version = "0.1.0"
+description = "Dwarpal (द्वारपाल): a trust and security gateway for inbound AI-agent traffic, built on Google ADK and A2A."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Akshay Nara" }]
+keywords = ["a2a", "adk", "agents", "security", "gateway", "prompt-injection", "contact-center"]
+dependencies = [
+  "google-adk>=2.14,<3",
+  "a2a-sdk[http-server]>=1.3,<2",
+  "google-genai>=2.30",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+  "httpx>=0.27",
+  "cryptography>=42",
+  "pyyaml>=6",
+  "pydantic>=2.7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.24"]
+
+[project.scripts]
+dwarpal = "dwarpal.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dwarpal"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["ignore::DeprecationWarning", "ignore::UserWarning"]

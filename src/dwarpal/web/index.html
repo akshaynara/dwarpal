@@ -1,0 +1,554 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dwarpal console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700;12..96,800&family=Tiro+Devanagari+Hindi&display=swap">
+<style>
+:root {
+  --stone: #E9ECE7;
+  --stone-2: #DDE2DB;
+  --paper: #F7F8F5;
+  --ink: #1D2B2F;
+  --ink-2: #4A5A5E;
+  --ink-3: #7C8A8C;
+  --brass: #A87A1B;
+  --brass-soft: #EAD9AE;
+  --pass: #2E7650;
+  --pass-soft: #D3E8DA;
+  --fail: #B0281F;
+  --fail-soft: #F3D5D1;
+  --warn: #A9650A;
+  --warn-soft: #F4E2C2;
+  --handoff: #574A9E;
+  --handoff-soft: #DEDAF1;
+  --skip: #B8C0BD;
+  --line: #C9D0C8;
+  --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
+  --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
+  --deva: "Tiro Devanagari Hindi", "Noto Serif Devanagari", "Mangal", serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; }
+body {
+  background: var(--stone);
+  color: var(--ink);
+  font: 16px/1.5 var(--body);
+  -webkit-font-smoothing: antialiased;
+}
+button { font: inherit; color: inherit; cursor: pointer; }
+:focus-visible { outline: 3px solid var(--brass); outline-offset: 2px; }
+
+/* ---------- header ---------- */
+header {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  padding: 14px 28px; border-bottom: 1px solid var(--line); background: var(--paper);
+}
+.brand { display: flex; align-items: baseline; gap: 12px; }
+.brand .deva { font: 30px/1 var(--deva); color: var(--brass); }
+.brand .latin { font: 800 22px/1 var(--display); letter-spacing: -0.01em; }
+.biz { color: var(--ink-2); font-size: 15px; }
+.biz strong { color: var(--ink); }
+.spacer { flex: 1; }
+.pill {
+  display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
+  background: var(--stone); border: 1px solid var(--line); font-size: 14px; color: var(--ink-2);
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--pass); }
+.pill.mock .dot { background: var(--warn); }
+.btn {
+  border: 1px solid var(--line); background: var(--paper); border-radius: 8px; padding: 7px 14px;
+  font-size: 14px; font-weight: 700;
+}
+.btn:hover { border-color: var(--ink-3); }
+.btn.quiet { background: transparent; }
+.btn[disabled] { opacity: .5; cursor: progress; }
+
+/* ---------- layout ---------- */
+main {
+  display: grid; gap: 22px; padding: 22px 28px 40px;
+  grid-template-columns: 300px minmax(0, 1fr) 340px;
+  align-items: start;
+}
+@media (max-width: 1280px) { main { grid-template-columns: 280px minmax(0, 1fr); } .side { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 22px; } }
+@media (max-width: 820px) { main { grid-template-columns: 1fr; padding: 16px; } header { padding: 12px 16px; } }
+
+h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005em; }
+.panel { background: var(--paper); border: 1px solid var(--line); border-radius: 14px; padding: 18px; }
+.side { display: flex; flex-direction: column; gap: 22px; }
+
+/* ---------- scenarios ---------- */
+.scenarios { display: flex; flex-direction: column; gap: 6px; }
+.scn {
+  text-align: left; border: 1px solid transparent; background: transparent; border-radius: 10px;
+  padding: 10px 12px; display: grid; grid-template-columns: 1fr auto; gap: 2px 10px;
+}
+.scn:hover { background: var(--stone); }
+.scn.running { background: var(--brass-soft); border-color: var(--brass); }
+.scn .t { font-weight: 700; font-size: 15px; line-height: 1.3; }
+.scn .s { grid-column: 1 / -1; color: var(--ink-2); font-size: 13.5px; line-height: 1.4; }
+.scn .res { font-size: 13px; color: var(--ink-3); align-self: start; }
+.scn .res.ok { color: var(--pass); }
+.scn .res.bad { color: var(--fail); }
+.run-all { margin-top: 10px; width: 100%; }
+
+/* ---------- the gate ---------- */
+.gate-wrap { padding: 26px 26px 22px; }
+.gate-head { display: flex; gap: 16px; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; }
+.caller { font: 700 26px/1.15 var(--display); letter-spacing: -0.015em; max-width: 34ch; }
+.caller small { display: block; font: 400 15px/1.4 var(--body); color: var(--ink-2); margin-top: 6px; letter-spacing: 0; }
+.outcome {
+  font: 800 15px/1 var(--display); padding: 9px 14px; border-radius: 8px; white-space: nowrap;
+  background: var(--stone); color: var(--ink-2);
+}
+.outcome.completed { background: var(--pass-soft); color: var(--pass); }
+.outcome.rejected { background: var(--warn-soft); color: var(--warn); }
+.outcome.denied, .outcome.error { background: var(--fail-soft); color: var(--fail); }
+.outcome.escalated { background: var(--handoff-soft); color: var(--handoff); }
+.outcome.needs_structure { background: var(--brass-soft); color: var(--brass); }
+
+.track { position: relative; margin: 34px 0 10px; display: grid; grid-template-columns: 90px repeat(7, minmax(0, 1fr)) 90px; align-items: end; }
+.track::before {
+  content: ""; position: absolute; left: 45px; right: 45px; top: var(--line-y, 70px); margin-top: -2px; height: 4px; border-radius: 2px;
+  background: repeating-linear-gradient(90deg, var(--line) 0 10px, transparent 10px 16px);
+}
+.end { text-align: center; font-size: 13px; color: var(--ink-2); position: relative; z-index: 1; align-self: start; }
+.end .disc {
+  width: 52px; height: 52px; margin: 0 auto 6px; border-radius: 50%; display: grid; place-items: center;
+  background: var(--paper); border: 2px solid var(--ink); font: 700 13px/1 var(--display);
+}
+.end.biz-end .disc { border-color: var(--brass); color: var(--brass); }
+.end.dim .disc { border-color: var(--line); color: var(--ink-3); }
+.pillar { position: relative; z-index: 1; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.pillar .cap {
+  width: 74%; max-width: 64px; height: 12px; border-radius: 4px 4px 0 0; background: var(--skip);
+  transition: background .25s;
+}
+.pillar .shaft {
+  width: 56%; max-width: 46px; height: 92px; border-radius: 2px; background: var(--stone-2);
+  border: 2px solid var(--skip); display: grid; place-items: center; transition: background .25s, border-color .25s, transform .25s;
+}
+.pillar .glyph { color: var(--skip); transition: color .25s; display: grid; place-items: center; }
+.pillar .glyph svg { width: 24px; height: 24px; }
+.pillar .name { font-size: 13px; font-weight: 700; color: var(--ink-3); text-align: center; line-height: 1.2; min-height: 2.4em; }
+.pillar.lit .name { color: var(--ink); }
+.pillar.pass .cap { background: var(--pass); } .pillar.pass .shaft { border-color: var(--pass); background: var(--pass-soft); } .pillar.pass .glyph { color: var(--pass); }
+.pillar.warn .cap { background: var(--warn); } .pillar.warn .shaft { border-color: var(--warn); background: var(--warn-soft); } .pillar.warn .glyph { color: var(--warn); }
+.pillar.fail .cap { background: var(--fail); } .pillar.fail .shaft { border-color: var(--fail); background: var(--fail-soft); transform: scale(1.08); } .pillar.fail .glyph { color: var(--fail); }
+.pillar.handoff .cap { background: var(--handoff); } .pillar.handoff .shaft { border-color: var(--handoff); background: var(--handoff-soft); transform: scale(1.08); } .pillar.handoff .glyph { color: var(--handoff); }
+.pillar.skip .shaft { border-style: dashed; }
+.token {
+  position: absolute; top: calc(var(--line-y, 70px) - 12px); left: 45px; width: 24px; height: 24px; margin-left: -12px; border-radius: 50%;
+  background: var(--brass); box-shadow: 0 0 0 5px rgba(168,122,27,.18); z-index: 2;
+  transition: left .32s cubic-bezier(.4,.1,.3,1), background .2s;
+}
+.token.stopped { background: var(--fail); box-shadow: 0 0 0 6px rgba(176,40,31,.18); }
+.token.handed { background: var(--handoff); box-shadow: 0 0 0 6px rgba(87,74,158,.18); }
+.token.hidden { opacity: 0; }
+.track.instant, .track.instant * { transition: none !important; }
+
+.reply {
+  margin: 22px 0 4px; padding: 14px 16px; border-left: 4px solid var(--brass); background: var(--stone);
+  border-radius: 0 10px 10px 0; font-size: 17px; line-height: 1.5;
+}
+.checks { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 2px; }
+.checks li { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--stone-2); font-size: 14.5px; }
+.checks li:last-child { border-bottom: 0; }
+.checks .k { font-weight: 700; }
+.checks .k::before { content: ""; display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 8px; background: var(--skip); vertical-align: 1px; }
+.checks li.pass .k::before { background: var(--pass); }
+.checks li.warn .k::before { background: var(--warn); }
+.checks li.fail .k::before { background: var(--fail); }
+.checks li.handoff .k::before { background: var(--handoff); }
+.checks li.skip { color: var(--ink-3); }
+.extras { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; font-size: 14px; color: var(--ink-2); align-items: center; }
+.hash { font-family: var(--mono); font-size: 12.5px; background: var(--stone); padding: 2px 6px; border-radius: 5px; color: var(--ink); }
+.empty { color: var(--ink-2); padding: 40px 0 10px; font-size: 17px; max-width: 52ch; }
+
+/* ---------- timeline ---------- */
+.timeline { margin-top: 22px; }
+.rows { display: flex; flex-direction: column; }
+.row {
+  display: grid; grid-template-columns: 96px minmax(0, 1fr) auto 140px; gap: 14px; align-items: center;
+  text-align: left; padding: 9px 10px; border: 0; background: transparent; border-radius: 8px; border-bottom: 1px solid var(--stone-2);
+}
+.row:hover, .row.sel { background: var(--stone); }
+.row .when { white-space: nowrap; font-size: 13px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.row .what { font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .what b { font-weight: 700; }
+.row .dots { display: flex; gap: 4px; }
+.row .dots i { width: 10px; height: 10px; border-radius: 3px; background: var(--skip); display: block; }
+.row .dots i.pass { background: var(--pass); } .row .dots i.warn { background: var(--warn); }
+.row .dots i.fail { background: var(--fail); } .row .dots i.handoff { background: var(--handoff); }
+.row .oc { font-size: 13px; font-weight: 700; text-align: right; }
+.oc.completed { color: var(--pass); } .oc.rejected { color: var(--warn); } .oc.denied, .oc.error { color: var(--fail); }
+.oc.escalated { color: var(--handoff); } .oc.needs_structure { color: var(--brass); }
+@media (max-width: 820px) { .row { grid-template-columns: 1fr auto; } .row .when, .row .dots { display: none; } .track { grid-template-columns: 40px repeat(7, minmax(0,1fr)) 40px; } .end .disc { width: 34px; height: 34px; font-size: 10px; } .end span { display: none; } .pillar .name { display: none; } .pillar .shaft { height: 64px; } .checks li { grid-template-columns: 1fr; gap: 2px; } .caller { font-size: 21px; } }
+
+/* ---------- side panels ---------- */
+.ticket { border-top: 1px solid var(--stone-2); padding: 12px 0; }
+.ticket:first-of-type { border-top: 0; padding-top: 0; }
+.ticket .top { display: flex; justify-content: space-between; gap: 4px 10px; align-items: baseline; flex-wrap: wrap; }
+.ticket .id { font-weight: 700; color: var(--handoff); white-space: nowrap; }
+.ticket .who { font-size: 13.5px; color: var(--ink-2); }
+.ticket p { margin: 6px 0 8px; font-size: 14.5px; }
+.ticket.resolved { opacity: .6; }
+.ticket.resolved .id { color: var(--ink-3); }
+.chain-state { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 10px; margin-bottom: 12px; font-weight: 700; }
+.chain-state.ok { background: var(--pass-soft); color: var(--pass); }
+.chain-state.bad { background: var(--fail-soft); color: var(--fail); }
+.chain-state small { display: block; font-weight: 400; color: var(--ink-2); }
+.links { list-style: none; padding: 0; margin: 0 0 12px; }
+.links li { display: grid; grid-template-columns: 34px 1fr auto; gap: 8px; font-size: 13.5px; padding: 5px 0; align-items: center; }
+.links li .n { color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.links li.broken { color: var(--fail); font-weight: 700; }
+.btns { display: flex; gap: 8px; flex-wrap: wrap; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+td, th { text-align: left; padding: 6px 6px 6px 0; border-bottom: 1px solid var(--stone-2); vertical-align: top; }
+th { font-size: 13px; color: var(--ink-3); font-weight: 700; }
+td:first-child { white-space: nowrap; font-weight: 700; }
+tr.flash td { animation: flash 1.6s ease-out; }
+@keyframes flash { from { background: var(--brass-soft); } to { background: transparent; } }
+.muted { color: var(--ink-3); font-size: 14px; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition: none !important; animation: none !important; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="deva" lang="hi">द्वारपाल</span><span class="latin">Dwarpal</span></div>
+  <div class="biz">Guarding <strong id="bizName">…</strong> from inbound AI agents</div>
+  <div class="spacer"></div>
+  <span class="pill" id="modePill"><span class="dot"></span><span id="modeText">connecting</span></span>
+  <button class="btn quiet" id="resetBtn" type="button">Reset demo</button>
+</header>
+
+<main>
+  <section class="panel" aria-labelledby="scnTitle">
+    <h2 id="scnTitle">Send agents to the gate</h2>
+    <div class="scenarios" id="scenarios"></div>
+    <button class="btn run-all" id="runAll" type="button">Run every scenario</button>
+  </section>
+
+  <section>
+    <div class="panel gate-wrap" id="gate" aria-live="polite">
+      <div class="empty" id="gateEmpty">Pick a scenario. Each request from a caller's AI agent walks through the gate, and stops at the first check that refuses it.</div>
+      <div id="gateBody" hidden>
+        <div class="gate-head">
+          <div class="caller" id="gCaller"></div>
+          <div class="outcome" id="gOutcome"></div>
+        </div>
+        <div class="track" id="track">
+          <div class="end" id="endCaller"><div class="disc">Agent</div><span>Caller</span></div>
+          <!-- pillars injected -->
+          <div class="end biz-end" id="endBiz"><div class="disc">Clinic</div><span>Front desk</span></div>
+          <div class="token hidden" id="token"></div>
+        </div>
+        <div class="reply" id="gReply"></div>
+        <ul class="checks" id="gChecks"></ul>
+        <div class="extras" id="gExtras"></div>
+      </div>
+    </div>
+
+    <div class="panel timeline">
+      <h2>Every request, newest first</h2>
+      <div class="rows" id="rows"><div class="muted">Nothing has reached the gate yet.</div></div>
+    </div>
+  </section>
+
+  <aside class="side">
+    <section class="panel">
+      <h2>Waiting for a person</h2>
+      <div id="tickets"><div class="muted">No handoffs. Disputes, sensitive requests and runaway agents land here.</div></div>
+    </section>
+    <section class="panel">
+      <h2>Audit chain</h2>
+      <div id="chainState" class="chain-state ok">Checking…</div>
+      <ul class="links" id="links"></ul>
+      <div class="btns">
+        <button class="btn" id="verifyBtn" type="button">Verify chain</button>
+        <button class="btn quiet" id="tamperBtn" type="button">Tamper with a record</button>
+      </div>
+    </section>
+    <section class="panel">
+      <h2>Clinic appointments</h2>
+      <table><thead><tr><th>Id</th><th>Patient</th><th>Slot</th><th>Status</th></tr></thead><tbody id="apts"></tbody></table>
+    </section>
+  </aside>
+</main>
+
+<script>
+const CHECKS = [
+  ["identity", "Identity", "ID"], ["protocol", "Protocol", "{ }"], ["security", "Security", "⛨"],
+  ["delegation", "Delegation", "₹"], ["escalation", "Escalation", "⇄"], ["data_guard", "Data guard", "◐"],
+  ["audit", "Audit", "#"],
+];
+const ICON = {
+  identity: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="11" r="2.2"/><path d="M5.8 16.2c.6-1.6 1.8-2.4 3.2-2.4s2.6.8 3.2 2.4M14.5 10h4M14.5 13.5h3"/>',
+  protocol: '<path d="M8 4c-2 0-2.5 1-2.5 3v2c0 1.5-.8 2.5-2 3 1.2.5 2 1.5 2 3v2c0 2 .5 3 2.5 3M16 4c2 0 2.5 1 2.5 3v2c0 1.5.8 2.5 2 3-1.2.5-2 1.5-2 3v2c0 2-.5 3-2.5 3"/>',
+  security: '<path d="M12 3l7.5 3v5.5c0 4.5-3.2 8.2-7.5 9.5-4.3-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/>',
+  delegation: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2.5 2.5M14 9l2 2"/>',
+  escalation: '<circle cx="12" cy="7.5" r="3.5"/><path d="M5 20c.8-3.8 3.6-6 7-6s6.2 2.2 7 6"/>',
+  data_guard: '<path d="M3 12s3.5-6 9-6c1.6 0 3 .5 4.2 1.2M21 12s-3.5 6-9 6c-1.6 0-3-.5-4.2-1.2"/><path d="M9.5 14.5a3.5 3.5 0 015-5M4 20L20 4"/>',
+  audit: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
+};
+const svg = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k]}</svg>`;
+const OUTCOME = {
+  completed: "Completed", rejected: "Business said no", denied: "Refused at the gate", escalated: "Handed to a person",
+  needs_structure: "Asked to use structure", error: "Error",
+};
+const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const api = async (path, opts) => { const r = await fetch(path, opts); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.json(); };
+
+// ---------- pillars ----------
+const track = $("track");
+CHECKS.forEach(([key, name, glyph]) => {
+  const el = document.createElement("div");
+  el.className = "pillar"; el.dataset.key = key;
+  el.innerHTML = `<div class="cap"></div><div class="shaft"><span class="glyph">${svg(key)}</span></div><div class="name">${esc(name)}</div>`;
+  track.insertBefore(el, $("endBiz"));
+});
+const pillars = [...track.querySelectorAll(".pillar")];
+function layoutTrack() {
+  const tr = track.getBoundingClientRect();
+  const sh = pillars[0].querySelector(".shaft").getBoundingClientRect();
+  if (!sh.height) return;
+  const y = sh.top - tr.top + sh.height / 2;
+  track.style.setProperty("--line-y", y + "px");
+  track.querySelectorAll(".end").forEach((e) => {
+    const disc = e.querySelector(".disc");
+    e.style.marginTop = Math.max(0, y - disc.offsetHeight / 2) + "px";
+  });
+}
+
+// ---------- state ----------
+const decisions = [];
+let selected = null;
+const queue = [];
+let playing = false;
+
+function tokenLeftFor(index) {
+  // index: -1 caller, 0..6 pillars, 7 business
+  const cols = track.children;
+  const target = index < 0 ? $("endCaller") : index >= 7 ? $("endBiz") : pillars[index];
+  const t = target.getBoundingClientRect(), tr = track.getBoundingClientRect();
+  return (t.left - tr.left) + t.width / 2;
+}
+
+function stopIndex(d) {
+  const order = CHECKS.map((c) => c[0]);
+  const idx = order.findIndex((k) => { const c = d.checks.find((x) => x.name === k); return c && (c.status === "fail" || c.status === "handoff"); });
+  return idx;
+}
+
+async function showDecision(d, animate) {
+  selected = d.request_id;
+  $("gateEmpty").hidden = true; $("gateBody").hidden = false;
+  const a = d.agent;
+  $("gCaller").innerHTML = a
+    ? `${esc(a.name)}<small>acting for ${esc(a.principal.name)}${d.intent ? `, asking for <b>${esc(d.intent.replaceAll("_", " "))}</b>` : ""}</small>`
+    : `Unverified caller<small>${d.intent ? `asking for <b>${esc(d.intent.replaceAll("_", " "))}</b>` : "no intent"}</small>`;
+  const oc = $("gOutcome"); oc.className = `outcome ${d.outcome}`; oc.textContent = OUTCOME[d.outcome] || d.outcome;
+  $("gReply").textContent = d.reply;
+  $("gChecks").innerHTML = CHECKS.map(([k, name]) => {
+    const c = d.checks.find((x) => x.name === k) || { status: "skip", detail: "Not reached." };
+    return `<li class="${c.status}"><span class="k">${esc(name)}</span><span>${esc(c.detail)}</span></li>`;
+  }).join("");
+  const ex = [];
+  if (d.receipt) ex.push(`Signed receipt <span class="hash">${esc(d.receipt.slice(-22))}</span> <button class="btn quiet" type="button" data-copy="${esc(d.receipt)}">Copy receipt</button>`);
+  if (d.ticket_id) ex.push(`Ticket <b>${esc(d.ticket_id)}</b>`);
+  if (d.audit_seq) ex.push(`Audit record #${d.audit_seq}`);
+  ex.push(`${d.latency_ms < 1 ? "Under 1" : d.latency_ms} ms through the gate`);
+  $("gExtras").innerHTML = ex.join('<span aria-hidden="true">/</span>');
+  document.querySelectorAll(".row").forEach((r) => r.classList.toggle("sel", r.dataset.id === selected));
+
+  layoutTrack();
+  const stop = stopIndex(d);
+  const statusOf = (k) => (d.checks.find((x) => x.name === k) || {}).status || "skip";
+  const token = $("token");
+  token.className = "token";
+  pillars.forEach((p) => (p.className = "pillar"));
+  $("endBiz").classList.toggle("dim", stop >= 0 && stop < 6);
+
+  const reachedBiz = d.outcome === "completed" || d.outcome === "rejected";
+  if (!animate || reduceMotion) {
+    track.classList.add("instant");
+    pillars.forEach((p) => p.classList.add("lit", statusOf(p.dataset.key)));
+    token.style.left = tokenLeftFor(stop >= 0 && stop < 6 ? stop : reachedBiz ? 7 : 6) + "px";
+    if (stop >= 0) token.classList.add(statusOf(CHECKS[stop][0]) === "handoff" ? "handed" : "stopped");
+    void track.offsetWidth; setTimeout(() => track.classList.remove("instant"), 60);
+    return;
+  }
+  token.style.transition = "none"; token.style.left = tokenLeftFor(-1) + "px";
+  void token.offsetWidth; token.style.transition = "";
+  for (let i = 0; i < pillars.length; i++) {
+    const key = pillars[i].dataset.key;
+    const st = statusOf(key);
+    // audit runs for every request, even ones refused earlier: light it last without moving the token
+    if (stop >= 0 && i > stop && key !== "audit") { pillars[i].classList.add(st); continue; }
+    if (stop >= 0 && i > stop && key === "audit") { await sleep(160); pillars[i].classList.add("lit", st); continue; }
+    token.style.left = tokenLeftFor(i) + "px";
+    await sleep(240);
+    pillars[i].classList.add("lit", st);
+    if (i === stop) { token.classList.add(st === "handoff" ? "handed" : "stopped"); }
+  }
+  if (stop < 0 || stop === 6) { if (reachedBiz) { await sleep(120); token.style.left = tokenLeftFor(7) + "px"; } }
+  await sleep(500);
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function pump() {
+  if (playing) return; playing = true;
+  while (queue.length) { await showDecision(queue.shift(), true); }
+  playing = false;
+}
+
+// ---------- timeline ----------
+function renderRows() {
+  const rows = $("rows");
+  if (!decisions.length) { rows.innerHTML = '<div class="muted">Nothing has reached the gate yet.</div>'; return; }
+  rows.innerHTML = decisions.slice().reverse().slice(0, 40).map((d) => {
+    const t = new Date(d.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+    const dots = CHECKS.map(([k]) => `<i class="${(d.checks.find((x) => x.name === k) || {}).status || "skip"}"></i>`).join("");
+    const who = d.agent ? d.agent.name : "Unverified caller";
+    return `<button type="button" class="row ${d.request_id === selected ? "sel" : ""}" data-id="${esc(d.request_id)}">
+      <span class="when">${t}</span>
+      <span class="what"><b>${esc(who)}</b> ${esc(d.intent ? d.intent.replaceAll("_", " ") : "free text")}</span>
+      <span class="dots" aria-hidden="true">${dots}</span>
+      <span class="oc ${d.outcome}">${esc(OUTCOME[d.outcome] || d.outcome)}</span></button>`;
+  }).join("");
+}
+$("rows").addEventListener("click", (e) => {
+  const b = e.target.closest(".row"); if (!b) return;
+  const d = decisions.find((x) => x.request_id === b.dataset.id); if (d) showDecision(d, true);
+});
+$("gExtras").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-copy]"); if (!b) return;
+  try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; } catch { b.textContent = "Copy failed"; }
+});
+
+// ---------- side panels ----------
+async function loadTickets() {
+  const { tickets } = await api("/api/escalations");
+  $("tickets").innerHTML = tickets.length ? tickets.map((t) => `
+    <div class="ticket ${t.status}">
+      <div class="top"><span class="id">${esc(t.id)}</span><span class="who">${esc(t.agent_name)} for ${esc(t.principal.name)}</span></div>
+      <p>${esc(t.reason)}</p>
+      ${t.status === "open" ? `<button class="btn" type="button" data-resolve="${esc(t.id)}">Mark resolved</button>` : `<span class="muted">Resolved: ${esc(t.resolution)}</span>`}
+    </div>`).join("") : '<div class="muted">No handoffs. Disputes, sensitive requests and runaway agents land here.</div>';
+}
+$("tickets").addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-resolve]"); if (!b) return;
+  b.disabled = true;
+  await api(`/api/escalations/${b.dataset.resolve}/resolve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ resolution: "Front desk called the patient back." }) });
+  loadTickets(); loadAudit();
+});
+
+async function loadAudit() {
+  const { records, verify } = await api("/api/audit?limit=8");
+  const st = $("chainState");
+  if (verify.ok) { st.className = "chain-state ok"; st.innerHTML = `Intact<small>${verify.count} records, each hashed into the next and signed by the gateway</small>`; }
+  else { st.className = "chain-state bad"; st.innerHTML = `Broken at record #${verify.broken_at}<small>${esc(verify.reason)}</small>`; }
+  $("links").innerHTML = records.slice().reverse().map((r) => {
+    const d = r.data || {};
+    const label = r.event === "agent_request" ? `${d.outcome || ""} ${d.intent ? d.intent.replaceAll("_", " ") : ""}` : r.event.replaceAll("_", " ");
+    return `<li class="${!verify.ok && r.seq === verify.broken_at ? "broken" : ""}"><span class="n">#${r.seq}</span><span>${esc(label)}</span><span class="hash">${esc((r.hash || "").slice(0, 8))}</span></li>`;
+  }).join("") || '<li class="muted">Empty.</li>';
+}
+$("verifyBtn").onclick = loadAudit;
+$("tamperBtn").onclick = async () => { await api("/api/demo/tamper", { method: "POST" }); loadAudit(); };
+
+let lastApts = {};
+const fmtSlot = (iso) => { const d = new Date(iso + ":00"); return isNaN(d) ? iso : d.toLocaleDateString([], { day: "numeric", month: "short" }) + ", " + iso.slice(11, 16); };
+async function loadClinic() {
+  const { appointments } = await api("/api/clinic");
+  $("apts").innerHTML = appointments.map((a) => {
+    const sig = a.slot + a.status + a.copay_refunded;
+    const changed = lastApts[a.id] && lastApts[a.id] !== sig;
+    lastApts[a.id] = sig;
+    return `<tr class="${changed ? "flash" : ""}"><td>${esc(a.id)}</td><td>${esc(a.patient)}</td><td>${esc(fmtSlot(a.slot))}</td><td>${esc(a.status)}${a.copay_refunded ? ", refunded" : ""}</td></tr>`;
+  }).join("");
+}
+
+// ---------- scenarios ----------
+let scenarioList = [];
+async function loadScenarios() {
+  const { scenarios } = await api("/api/scenarios");
+  scenarioList = scenarios;
+  $("scenarios").innerHTML = scenarios.map((s) => `
+    <button type="button" class="scn" data-id="${esc(s.id)}">
+      <span class="t">${esc(s.title)}</span><span class="res" id="res-${esc(s.id)}"></span>
+      <span class="s">${esc(s.story)}</span>
+    </button>`).join("");
+}
+let busy = false;
+async function runScenario(id) {
+  const btn = document.querySelector(`.scn[data-id="${id}"]`);
+  btn.classList.add("running");
+  const res = $(`res-${id}`); res.className = "res"; res.textContent = "Running";
+  try {
+    const r = await api(`/api/scenarios/${id}/run`, { method: "POST" });
+    res.className = `res ${r.as_expected ? "ok" : "bad"}`;
+    res.textContent = r.as_expected ? "As designed" : "Unexpected";
+  } catch (err) { res.className = "res bad"; res.textContent = "Failed"; console.error(err); }
+  btn.classList.remove("running");
+  await Promise.all([loadTickets(), loadAudit(), loadClinic()]);
+  while (playing || queue.length) await sleep(150);
+}
+function setBusy(v) { busy = v; document.querySelectorAll(".scn, #runAll, #resetBtn").forEach((b) => (b.disabled = v)); }
+$("scenarios").addEventListener("click", async (e) => {
+  const b = e.target.closest(".scn"); if (!b || busy) return;
+  setBusy(true); await runScenario(b.dataset.id); setBusy(false);
+});
+$("runAll").onclick = async () => {
+  if (busy) return; setBusy(true);
+  for (const s of scenarioList) await runScenario(s.id);
+  setBusy(false);
+};
+$("resetBtn").onclick = async () => {
+  await api("/api/demo/reset", { method: "POST" });
+  decisions.length = 0; queue.length = 0; selected = null; lastApts = {};
+  $("gateBody").hidden = true; $("gateEmpty").hidden = false;
+  document.querySelectorAll(".res").forEach((r) => (r.textContent = ""));
+  renderRows(); loadTickets(); loadAudit(); loadClinic();
+};
+
+// ---------- live events ----------
+function connect() {
+  const es = new EventSource("/api/events");
+  es.onmessage = (m) => {
+    const ev = JSON.parse(m.data);
+    if (ev.type === "decision") { decisions.push(ev.decision); renderRows(); queue.push(ev.decision); pump(); }
+    else if (ev.type === "ticket") loadTickets();
+    else if (ev.type === "audit") loadAudit();
+  };
+  es.onerror = () => { $("modePill").title = "Live updates reconnecting"; };
+  es.onopen = () => loadInfo();
+}
+async function loadInfo() {
+  const info = await api("/api/info");
+  $("bizName").textContent = info.business.name;
+  const gem = info.llm_mode === "gemini";
+  $("modePill").classList.toggle("mock", !gem);
+  $("modeText").textContent = gem ? `Gemini: ${info.model}` : "Offline scripted model";
+  $("modePill").title = `Shield layers: ${info.shield_layers.join(", ")}`;
+}
+
+(async function init() {
+  await Promise.all([loadInfo(), loadScenarios(), loadTickets(), loadAudit(), loadClinic()]);
+  const { decisions: past } = await api("/api/decisions");
+  decisions.push(...past); renderRows();
+  if (past.length) showDecision(past[past.length - 1], false);
+  if (!new URLSearchParams(location.search).has("static")) connect();  // ?static for snapshots
+  window.addEventListener("resize", () => { const d = decisions.find((x) => x.request_id === selected); if (d && !playing) showDecision(d, false); });
+})();
+</script>
+</body>
+</html>

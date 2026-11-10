@@ -1,0 +1,81 @@
+# Dwarpal policy for a business that accepts calls from customers' AI agents.
+# Everything the gateway enforces is declared here, so the business (not the model) owns the rules.
+
+business:
+  id: clinic.sunrise.example        # the passport 'aud' callers must present
+  name: Sunrise Family Clinic
+  description: Front desk AI for appointments at a family clinic.
+
+# Identity providers whose agent passports we accept (keys live in the trust store).
+trusted_issuers:
+  - id: idp.healthwallet.example
+    label: HealthWallet patient identity
+
+# What a caller's agent may ask for. Anything not listed is refused.
+#   scope : passport scope required
+#   mode  : a2a   -> handled agent-to-agent, structured, fast
+#           human -> always handed to a person (contested, sensitive or binding)
+#   risk  : low | medium | high (shown in audit and dashboard)
+#   params: allowed parameters; anything else is stripped before the business agent sees it
+intents:
+  appointment_status:
+    description: Look up an existing appointment.
+    scope: appointments:read
+    mode: a2a
+    risk: low
+    params: [appointment_id]
+  list_slots:
+    description: List open slots for a doctor on a date.
+    scope: appointments:read
+    mode: a2a
+    risk: low
+    params: [doctor, date]
+  reschedule_appointment:
+    description: Move an appointment to a new open slot.
+    scope: appointments:write
+    mode: a2a
+    risk: low
+    params: [appointment_id, new_slot]
+  cancel_appointment:
+    description: Cancel an appointment.
+    scope: appointments:write
+    mode: a2a
+    risk: medium
+    params: [appointment_id, reason]
+  refund_copay:
+    description: Refund a co-pay for a cancelled visit.
+    scope: billing:write
+    mode: a2a
+    risk: medium
+    params: [appointment_id, amount_inr]
+    amount_param: amount_inr
+    max_amount_inr: 1500          # business-side ceiling, applied on top of the passport's own limit
+  billing_dispute:
+    description: Dispute a charge. Contested by nature, so a person decides.
+    scope: billing:write
+    mode: human
+    risk: high
+    params: [invoice_id, reason]
+  medical_records:
+    description: Prescriptions, lab results, diagnoses. Never released to an agent.
+    scope: records:read
+    mode: human
+    risk: high
+    params: [record_type]
+
+# Guards against runaway or adversarial agent loops.
+limits:
+  max_turns_per_session: 8            # requests per A2A context before a human takes over
+  max_cost_units_per_session: 20      # rough compute budget (1 unit per model call)
+  max_requests_per_minute: 20         # per agent
+  max_identical_requests: 3           # same intent + params repeated -> loop
+  max_denials_per_session: 3          # repeatedly hitting walls -> probe, escalate
+  max_note_chars: 400                 # free text is optional context, not a channel
+
+# Fields the business agent must never send back to an agent, whatever it was asked.
+data_policy:
+  never_disclose_fields: [diagnosis, prescription, lab_results, medications, phone, address, dob, insurance_id]
+  redact_patterns:
+    phone_in: '(?<!\d)(?:\+91[\s-]?)?[6-9]\d{9}(?!\d)'
+    email: '[\w.+-]+@[\w-]+\.[\w.-]+'
+    aadhaar: '(?<!\d)\d{4}\s?\d{4}\s?\d{4}(?!\d)'
