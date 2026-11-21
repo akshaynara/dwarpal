@@ -1,0 +1,10 @@
+# Keep secrets and local state out of Cloud Build uploads and images
+.env
+.env.*
+!.env.example
+.venv/
+.dwarpal/
+.git/
+__pycache__/
+*.pem
+.pytest_cache/
