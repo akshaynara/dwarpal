@@ -115,6 +115,19 @@ Each record holds `seq, ts, event, data, prev` and gets `hash = sha256(canonical
 
 For completed actions by verified agents, the receipt (`typ: dwarpal-receipt+jwt`) contains the request hash, result hash, tier, intent, principal, step-up evidence, the audit chain head, and `customer_message_sha256`. `POST /api/receipts/verify` checks a receipt and, optionally, whether a relayed message matches what the business said.
 
+## The phone lane
+
+The business's voice platform calls `POST /voice/turn` on each turn, authenticated by a channel key, with the recognised intent, the IVR's verification of the patient (if done), and signals: carrier attestation, an AI-voice score and whether the caller declared itself an agent. The contract is in [voice-integration.md](voice-integration.md).
+
+- **Proof on the phone.** The IVR's verification is the phone equivalent of a passport for account-tier actions, exactly as at the front desk today. Binding actions need step-up, as everywhere. A strong signal never replaces verification.
+- **Signals restrict, never grant.** Undisclosed AI voice adds step-up to account-tier actions. A declared agent is offered the agent lane and meets the same friction on the call. Weak attestation adds step-up to account-tier changes. Open-tier actions are never affected, and no signal blocks.
+- **Disclosure never costs more than being caught.** Tested as an invariant.
+- **Accessibility.** Step-up always has paths without speech, and the spoken messages never mention how the caller sounds, so a person using a speech-generating device hears exactly what anyone else hears.
+- **Scores only.** Audio, recordings and transcripts are dropped on arrival; the audit records the scores and the names of dropped fields.
+- **Lane switch.** A declared agent gets a six-character lane code, spoken and in the response. Over A2A, the agent presents its passport plus the code. The gateway checks the passport's patient matches the call's verified patient, links the sessions, withdraws pending phone prompts, and returns the call's earlier requests. The code links context and grants nothing.
+
+**Residual risk, stated plainly:** an agent that pretends to be human, isn't detected, and knows the patient's details gets what a human caller gets today: account-tier actions after IVR verification. Binding actions still need the patient's own step-up, which the agent can't complete. Detection quality, and moving sensitive reads to the binding tier in policy, are the levers for narrowing this.
+
 ## Why ADK and A2A
 
 - **A2A** gives any caller agent a standard way to discover the gateway (agent card with each action's tier and the `agentPassport` scheme) and talk to it, whatever framework it was built with.

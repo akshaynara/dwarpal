@@ -171,6 +171,7 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .phone-card.ringing { animation: ring .9s ease-out 2; }
 @keyframes ring { 0% { box-shadow: 0 0 0 0 rgba(87,74,158,.45); } 100% { box-shadow: 0 0 0 16px rgba(87,74,158,0); } }
 .req .from { font-size: 13px; color: var(--ink-2); }
+.req + .req { border-top: 1px solid var(--stone-2); margin-top: 12px; padding-top: 12px; }
 .req .ask { font: 700 17px/1.3 var(--display); margin: 4px 0 8px; }
 .req .meter { height: 6px; background: var(--stone-2); border-radius: 3px; overflow: hidden; margin: 6px 0 10px; }
 .req .meter i { display: block; height: 100%; background: var(--handoff); transition: width .3s; }
@@ -181,10 +182,16 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .req.done { opacity: .65; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--stone-2); }
 .req.done .ask { font-size: 15px; margin: 2px 0; }
 .req.done:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.req.done + .req.done { margin-top: 8px; padding-top: 8px; }
 .btn.live { width: 100%; margin-bottom: 12px; background: var(--handoff); border-color: var(--handoff); color: #fff; }
 .btn.live:hover { border-color: var(--ink); }
 .ticket .due { font-size: 13.5px; color: var(--ink-2); margin: 0 0 8px; }
 .last-write { font-size: 13.5px; color: var(--ink-2); margin: 10px 0 0; }
+.lane-head { font: 700 14px/1.2 var(--body); color: var(--ink-2); margin: 16px 12px 4px; }
+.lane-head:first-child { margin-top: 4px; }
+.signals { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.sig { font-size: 13px; padding: 4px 9px; border-radius: 6px; background: var(--stone); color: var(--ink-2); }
+.sig.restrict { background: var(--warn-soft); color: var(--warn); font-weight: 700; }
 .checks { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 2px; }
 .checks li { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--stone-2); font-size: 14.5px; }
 .checks li:last-child { border-bottom: 0; }
@@ -276,14 +283,14 @@ tr.flash td { animation: flash 1.6s ease-out; }
           <div class="outcome" id="gOutcome"></div>
         </div>
         <div class="track" id="track">
-          <div class="end" id="endCaller"><div class="disc">Agent</div><span>Caller</span></div>
+          <div class="end" id="endCaller"><div class="disc" id="callerDisc">Agent</div><span>Caller</span></div>
           <!-- pillars injected -->
           <div class="end biz-end" id="endBiz"><div class="disc">Clinic</div><span>Front desk</span></div>
           <div class="token hidden" id="token"></div>
         </div>
         <div class="msgs">
-          <div class="msg agent"><span class="who">The calling agent gets</span><p id="gReply"></p><ul class="next" id="gNext"></ul></div>
-          <div class="msg customer" id="gCustomerBox"><span class="who">The customer hears, word for word</span><p id="gCustomer"></p></div>
+          <div class="msg agent"><span class="who" id="gReplyWho">The calling agent gets</span><p id="gReply"></p><ul class="next" id="gNext"></ul></div>
+          <div class="msg customer" id="gCustomerBox"><span class="who" id="gCustomerWho">The customer hears, word for word</span><p id="gCustomer"></p></div>
         </div>
         <ul class="checks" id="gChecks"></ul>
         <div class="extras" id="gExtras"></div>
@@ -298,8 +305,8 @@ tr.flash td { animation: flash 1.6s ease-out; }
 
   <aside class="side">
     <section class="panel">
-      <h2>Riya's phone</h2>
-      <div class="phone-card" id="phoneCard"><div id="phone"><div class="muted">When an agent asks for a binding action, Riya's approval request appears here.</div></div></div>
+      <h2>Patient's phone</h2>
+      <div class="phone-card" id="phoneCard"><div id="phone"><div class="muted">When a request needs the patient's own approval, it appears here.</div></div></div>
     </section>
     <section class="panel">
       <h2>Waiting for a person</h2>
@@ -343,6 +350,7 @@ const OUTCOME = {
   completed: "Completed", rejected: "Business said no", denied: "Refused at the gate", escalated: "Handed to a person",
   needs_structure: "Asked to use structure", step_up_required: "Waiting for the customer", error: "Error",
 };
+const RESTRICT = { ai_voice_undisclosed: "Adds step-up: AI voice, not declared", declared_agent: "Agent lane offered", low_attestation: "Adds step-up for changes: weak attestation" };
 const TIER = { open: "Open: anyone may ask", account: "Account: needs a verified delegation", binding: "Binding: needs the customer's own approval", human: "Human: a person decides" };
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const $ = (id) => document.getElementById(id);
@@ -401,7 +409,19 @@ async function showDecision(d, animate) {
   const who = a && a.verified ? `${esc(a.name)}<small>acting for ${esc(a.principal.name)}, ${asking}</small>`
     : a ? `${esc(a.name)}<small>no passport, ${asking}</small>`
     : `Unverified caller<small>${asking}</small>`;
-  $("gCaller").innerHTML = who + (d.tier ? `<span class="tier ${d.tier}">${esc(TIER[d.tier])}</span>` : "");
+  const sg = d.signals;
+  const sigHtml = sg ? `<div class="signals">
+      <span class="sig">Carrier attestation ${esc(sg.attestation || "none")}</span>
+      <span class="sig">AI-voice score ${sg.ai_voice_score == null ? "not given" : Number(sg.ai_voice_score).toFixed(2)}</span>
+      <span class="sig">${sg.declared_agent ? "Says it's an AI agent" : "No AI declaration"}</span>
+      ${(sg.restrictions || []).map((r) => `<span class="sig restrict">${esc(RESTRICT[r] || r)}</span>`).join("")}
+    </div>` : "";
+  const tierText = d.channel === "voice" && d.tier === "account" ? "Account: needs a verified caller" : TIER[d.tier];
+  $("gCaller").innerHTML = who + (d.tier ? `<span class="tier ${d.tier}">${esc(tierText)}</span>` : "") + sigHtml;
+  const isVoice = d.channel === "voice";
+  $("callerDisc").textContent = isVoice ? "Phone" : "Agent";
+  $("gReplyWho").textContent = isVoice ? "The voice platform gets" : "The calling agent gets";
+  $("gCustomerWho").textContent = isVoice ? "The caller hears, word for word" : "The customer hears, word for word";
   const oc = $("gOutcome"); oc.className = `outcome ${d.outcome}`; oc.textContent = OUTCOME[d.outcome] || d.outcome;
   $("gReply").textContent = d.reply;
   const ao = d.agent_outcome || {};
@@ -416,6 +436,8 @@ async function showDecision(d, animate) {
   const ex = [];
   if (d.receipt) ex.push(`Signed receipt <span class="hash">${esc(d.receipt.slice(-22))}</span> <button class="btn quiet" type="button" data-relay="1">Check the relay</button> <button class="btn quiet" type="button" data-copy="${esc(d.receipt)}">Copy receipt</button>`);
   if (d.ticket_id) ex.push(`Ticket <b>${esc(d.ticket_id)}</b>`);
+  if (d.agent_lane) ex.push(`Lane code <b>${esc(d.agent_lane.code)}</b> offered`);
+  if (d.continued_from_call) ex.push(`Continued from phone call ${esc(d.continued_from_call.call_id)}`);
   if (d.audit_seq) ex.push(`Audit record #${d.audit_seq}`);
   ex.push(`${d.latency_ms < 1 ? "Under 1" : d.latency_ms} ms through the gate`);
   $("gExtras").innerHTML = ex.join('<span aria-hidden="true">/</span>');
@@ -544,11 +566,16 @@ let scenarioList = [];
 async function loadScenarios() {
   const { scenarios } = await api("/api/scenarios");
   scenarioList = scenarios;
-  $("scenarios").innerHTML = scenarios.map((s) => `
+  const card = (s) => `
     <button type="button" class="scn" data-id="${esc(s.id)}">
       <span class="t">${esc(s.title)}</span><span class="res" id="res-${esc(s.id)}"></span>
       <span class="s">${esc(s.story)}</span>
-    </button>`).join("");
+    </button>`;
+  const lanes = [["agent", "Agent lane (A2A)"], ["phone", "Phone lane"]];
+  $("scenarios").innerHTML = lanes.map(([k, title]) => {
+    const list = scenarios.filter((s) => (s.lane || "agent") === k);
+    return list.length ? `<h3 class="lane-head">${esc(title)}</h3>` + list.map(card).join("") : "";
+  }).join("");
 }
 let busy = false;
 async function runScenario(id) {
@@ -579,11 +606,11 @@ async function loadPhone() {
   const { challenges, methods } = await api("/api/stepup");
   const pending = challenges.filter((c) => c.status === "pending");
   const done = challenges.filter((c) => c.status !== "pending").slice(0, 2);
-  const label = { approved: "Approved", used: "Approved and used", declined: "Declined", expired: "Expired" };
+  const label = { approved: "Approved", used: "Approved and used", declined: "Declined", expired: "Expired", superseded: "Withdrawn: replaced or moved to the agent lane" };
   const short = { app_biometric: "the app", sms_code: "SMS code", keypad_pin: "keypad PIN", voice_liveness: "voiceprint" };
   const pend = pending.map((c) => `
     <div class="req" data-cid="${esc(c.id)}">
-      <div class="from">${esc(c.agent_name)} is asking</div>
+      <div class="from">${c.agent_name === "Phone caller" ? `A phone caller verified as ${esc(c.principal_name)} is asking` : `${esc(c.agent_name)} is asking, for ${esc(c.principal_name)}`}</div>
       <div class="ask">Approve: ${esc(c.summary)}?</div>
       <div class="meter" aria-label="Approval strength ${c.strength} of ${c.required_strength}"><i style="width:${Math.min(100, (100 * c.strength) / c.required_strength)}%"></i></div>
       <div class="methods">${methods.map((m) => `<button class="btn" type="button" data-approve="${esc(m.id)}"${c.factors.includes(m.id) ? " disabled" : ""}><span>${esc(m.label)}</span><b>+${m.strength}</b></button>`).join("")}
@@ -591,7 +618,7 @@ async function loadPhone() {
       <p class="note" id="note-${esc(c.id)}">Needs strength ${c.required_strength}. A voiceprint counts for 1 at most.</p>
     </div>`).join("");
   const hist = done.map((c) => `<div class="req done"><div class="from">${esc(label[c.status] || c.status)}${c.factors.length ? ` with ${esc(c.factors.map((f) => short[f] || f).join(" + "))}` : ""}</div><div class="ask">${esc(c.summary)}</div></div>`).join("");
-  $("phone").innerHTML = pend + hist || '<div class="muted">When an agent asks for a binding action, Riya\'s approval request appears here.</div>';
+  $("phone").innerHTML = pend + hist || '<div class="muted">When a request needs the patient\'s own approval, it appears here.</div>';
   if (pending.length) { const card = $("phoneCard"); card.classList.remove("ringing"); void card.offsetWidth; card.classList.add("ringing"); }
 }
 $("phone").addEventListener("click", async (e) => {

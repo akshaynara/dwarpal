@@ -70,6 +70,16 @@ class HandoffPolicy:
 
 
 @dataclass
+class VoicePolicy:
+    verified_scopes: list[str] = field(default_factory=lambda: ["appointments:read"])
+    max_amount_inr: float | None = None
+    ai_voice_threshold: float = 0.8
+    low_attestation: list[str] = field(default_factory=lambda: ["C", "none"])
+    lane_code_ttl_seconds: int = 600
+    drop_fields: list[str] = field(default_factory=lambda: ["audio", "recording_url", "transcript"])
+
+
+@dataclass
 class DataPolicy:
     never_disclose_fields: list[str] = field(default_factory=list)
     redact_patterns: dict[str, re.Pattern[str]] = field(default_factory=dict)
@@ -86,6 +96,7 @@ class Policy:
     limits: Limits
     step_up: StepUpPolicy
     handoff: HandoffPolicy
+    voice: VoicePolicy
     customer_messages: dict[str, str]
     data: DataPolicy
 
@@ -125,6 +136,7 @@ class Policy:
             step_up=StepUpPolicy(required_strength=int(su.get("required_strength", 2)),
                                  ttl_seconds=int(su.get("ttl_seconds", 300)), methods=methods),
             handoff=HandoffPolicy(**(raw.get("handoff") or {})),
+            voice=VoicePolicy(**(raw.get("voice") or {})),
             customer_messages=dict(raw.get("customer_messages") or {}),
             data=DataPolicy(
                 never_disclose_fields=[f.lower() for f in d.get("never_disclose_fields") or []],

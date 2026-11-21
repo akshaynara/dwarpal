@@ -1,6 +1,6 @@
 # Dwarpal · द्वारपाल
 
-**Gate the action, not the caller.** One policy for every AI agent that calls your business, built on Google ADK and A2A.
+**Gate the action, not the caller.** One policy for every AI agent that calls your business, on the phone or over A2A, built on Google ADK.
 
 Customers are starting to send their own AI agents to deal with businesses: *"call the clinic and move my appointment"*, *"get my co-pay refunded"*. More and more often, the business answering is an AI agent too. Contact centres were designed for human callers, and an AI caller breaks most of their assumptions. It never tires, it can call hundreds of times a day, and it might be trying to talk your agent into something.
 
@@ -13,7 +13,7 @@ Guessing *who* is calling (human or bot, good bot or bad) will always be wrong s
 | **Binding** | Cancel, refund | Passport **plus the patient's own approval** of this exact action, on their own device |
 | **Human** | Billing dispute, medical records | Always decided by a person. The gateway opens a ticket with full context |
 
-Being honest about being an agent buys speed (structured A2A, done in seconds). Pretending buys nothing, because binding actions need the customer either way.
+The same tiers apply whether the request arrives over A2A or on a phone call. Being honest about being an agent buys speed (structured A2A, done in seconds). Pretending buys nothing, because binding actions need the customer either way.
 
 ## What the gateway checks
 
@@ -28,7 +28,9 @@ Being honest about being an agent buys speed (structured A2A, done in seconds). 
 | **Data guard** | What must never leave? | Policy-defined fields dropped and PII patterns redacted from every outbound response |
 | **Audit** | What was asked, approved and said? | Hash-chained, gateway-signed log of every decision, approval and business write. Completed actions return a signed receipt |
 
-Two more things set it apart:
+Three more things set it apart:
+
+- **One policy across voice and A2A.** The business's voice platform (an IVR or a CX Agent Studio agent) calls the gateway on each turn. Carrier attestation and AI-voice detection scores are *signals*: they can add friction, never unlock an action, and never block a caller. A declared agent is offered a lane code to switch to A2A, carrying the call's context with it. See [Connecting a voice platform](docs/voice-integration.md).
 
 - **No privileged path.** The business agent's tools and the human front desk change bookings through the *same* business service, with the same validation and the same audit trail. The gateway has no write access at all.
 - **The business keeps its own voice.** Every response carries two messages: a machine-readable outcome for the calling agent (reason codes, next steps, retry-after), and a message for the customer, written by the business from templates in its policy. The calling agent is asked to relay it as-is, and its SHA-256 goes into the signed receipt, so anyone can check what the business actually said. Refusals stay neutral: if a customer's assistant was compromised, the customer isn't accused.
@@ -40,8 +42,8 @@ git clone https://github.com/akshaynara/dwarpal && cd dwarpal
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest                  # 68 tests
-dwarpal demo            # twelve scenarios in the terminal (add -v to see every check)
+pytest                  # 83 tests
+dwarpal demo            # seventeen scenarios in the terminal (add -v to see every check)
 dwarpal serve           # gateway + live dashboard on http://localhost:8080
 ```
 
@@ -76,6 +78,16 @@ Open the dashboard and press **Ask Riya to approve, live**. Riya's assistant ask
 | Chatty agent | Free text gets the catalog back; the agent retries with a structured intent |
 | Loop guard | The fourth identical request hands the session to a person |
 
+**Phone lane** (through a simulated clinic IVR calling the gateway's voice endpoint):
+
+| Scenario | What happens |
+|---|---|
+| A person calls | The IVR verifies Riya; she cancels with her keypad PIN and an SMS code. The transcript and recording the platform sent are dropped |
+| An honest agent switches lanes | Riya's assistant presses 1, gets a lane code, and finishes the reschedule over A2A with its passport. The pending phone prompt is withdrawn |
+| A pretender | An agent with Riya's details sounds human. The detector adds step-up, a cloned voice can't pass it, and pressing 1 gets it the lane offer and nothing more |
+| A speech-device user | The detector flags Vikram's synthetic voice. He hears exactly what anyone would, passes with keypad and SMS, and is served as himself |
+| Carrier signals | A fully attested number doesn't replace verification; a weakly attested one adds step-up for changes, not for reading |
+
 The dashboard also shows the human queue (with due times and join codes), the clinic's appointment book with who made the last change and through which channel, and an audit panel where **Tamper with a record** edits the log on disk and verification shows where the chain breaks.
 
 ## How a caller talks to Dwarpal
@@ -101,6 +113,7 @@ For a binding action the first reply is `step_up_required` with a challenge id. 
 ```mermaid
 flowchart LR
   C["Customer's AI agent<br/>(any A2A client)"] -- "A2A + passport + signed proof" --> G
+  V["Phone call via the business's<br/>voice platform"] -- "/voice/turn + signals" --> G
   subgraph G["Dwarpal gateway"]
     direction LR
     I[Identity] --> L[Limits] --> P[Protocol] --> S[Security] --> D[Delegation] --> T{Tier}
@@ -131,11 +144,8 @@ Everything the business decides lives in one policy file ([`sunrise_clinic.yaml`
 
 ## Roadmap
 
-Shaped by feedback from people who run contact centres, healthcare operations and voice security:
+Shaped by feedback from people who run contact centres, healthcare operations and voice security. Done so far: action tiers, customer step-up, the shared business service, two messages per response, structured handoff, the phone lane with signals, the lane switch, and the accessibility path. Next:
 
-- **Voice front door.** Most agent traffic will arrive by phone for years. A CX Agent Studio adapter that asks the gateway the same question an A2A caller does, with carrier attestation (STIR/SHAKEN) and AI-voice detection scores as *signals*: they can add friction but never unlock an action. Scores only, never audio
-- **"Press 1 if you're a robot."** A detected or self-declared agent on a call gets a code that moves it to an A2A session, context included. Honest agents get the fast lane; nobody is forced to switch
-- **Accessibility.** A person using an AI voice to speak is a human caller. Step-up always offers methods that need no speech, and detection never blocks on its own
 - **Payor desk.** Prior-authorisation status and eligibility for providers' agents calling payors, with each payor's rails (FHIR PA API, X12 278, or voice and human fallback) declared in its policy file
 - **Standards.** Publish the passport as an A2A extension, move request signing to HTTP Message Signatures (RFC 9421), and accept Personal Agent Protocol credentials once its spec ships
 - **Measurement.** Share of traffic from agents, lane split, blocked data-exfiltration attempts, voice minutes moved to the fast lane, repeat calls avoided
@@ -151,6 +161,7 @@ Shaped by feedback from people who run contact centres, healthcare operations an
 | `DWARPAL_PUBLIC_URL` | `http://localhost:8080` | URL advertised in the agent card |
 | `DWARPAL_DEMO` | `true` | Set `false` in production to disable scenario, live, desk, tamper and reset endpoints |
 | `DWARPAL_MODEL_ARMOR_TEMPLATE` | unset | Enables the Model Armor layer |
+| `DWARPAL_CHANNEL_KEY` | generated | Shared secret for your voice platform; otherwise generated in `.dwarpal/channel.key` |
 
 ## License
 

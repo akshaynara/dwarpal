@@ -55,7 +55,7 @@ class CallerAgent:
 
     def prepare(self, *, intent: str | None = None, params: dict[str, Any] | None = None, note: str | None = None,
                 text: str = "", session: str | None = None, tag: str | None = None, sign: bool = True,
-                step_up: str | None = None) -> Message:
+                step_up: str | None = None, lane_code: str | None = None) -> Message:
         envelope = None
         if intent:
             envelope = {"intent": intent, "params": params or {}}
@@ -74,6 +74,9 @@ class CallerAgent:
         if step_up:
             meta["dwarpal_step_up"] = step_up
             signed["step_up"] = step_up  # the approval id is covered by the signature too
+        if lane_code:
+            meta["dwarpal_lane_code"] = lane_code
+            signed["lane_code"] = lane_code
         if sign and self.passport:
             meta["dwarpal_proof"] = sign_request(self.key, audience=self.audience, body=signed)
         if tag:

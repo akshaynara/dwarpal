@@ -1,5 +1,9 @@
-"""Stage-ready scenarios. Each one sends real, signed A2A requests through the gateway. Steps where the
-patient acts on their own phone (approving a step-up, joining a case) call the customer-side API."""
+"""Stage-ready scenarios.
+
+Agent-lane scenarios send real, signed A2A requests through the gateway. Phone-lane scenarios go through
+a simulated clinic IVR that calls the gateway's voice endpoint, exactly as a real voice platform would.
+Steps where a person acts on their own phone (approving a step-up, joining a case) call the
+customer-side API."""
 
 from __future__ import annotations
 
@@ -8,7 +12,55 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 
+import httpx
+
+from ..business.service import ClinicService
 from .callers import CallerAgent
+
+
+@dataclass
+class VoiceResult:
+    reply: str
+    payload: dict[str, Any]
+
+    @property
+    def outcome(self) -> str:
+        return self.payload.get("outcome", "?")
+
+    @property
+    def challenge_id(self) -> str | None:
+        return (self.payload.get("step_up") or {}).get("challenge_id")
+
+    @property
+    def lane(self) -> dict[str, Any] | None:
+        return self.payload.get("agent_lane")
+
+
+class IVR:
+    """The clinic's own voice platform, simulated. In production this is an IVR or a CX Agent Studio agent
+    that recognises the intent, verifies the patient against the clinic's records and calls Dwarpal's voice
+    endpoint on each turn, along with carrier attestation and a detection vendor's AI-voice score. It is
+    business-side, so it may look up records; callers never can."""
+
+    def __init__(self, http: httpx.AsyncClient, channel_key: str, service: ClinicService):
+        self.http, self.key, self.service = http, channel_key, service
+
+    def verify(self, patient_id: str, dob: str) -> dict[str, str] | None:
+        p = self.service.data["patients"].get(patient_id)
+        if p and p["dob"] == dob:
+            return {"principal_id": patient_id, "name": p["name"], "method": "patient_id+dob"}
+        return None
+
+    async def turn(self, call_id: str, *, intent: str | None = None, params: dict[str, Any] | None = None,
+                   signals: dict[str, Any] | None = None, verification: dict[str, str] | None = None,
+                   step_up: str | None = None, extra: dict[str, Any] | None = None, tag: str | None = None) -> VoiceResult:
+        body = {"call_id": call_id, "intent": intent, "params": params or {}, "signals": signals or {},
+                "verification": verification, "step_up": step_up, "tag": tag, **(extra or {})}
+        r = await self.http.post("/voice/turn", json=body, headers={"X-Dwarpal-Channel-Key": self.key})
+        r.raise_for_status()
+        data = r.json()
+        data["customer_message"] = data.get("say", "")
+        return VoiceResult(reply=data.get("reply", ""), payload=data)
 
 
 @dataclass
@@ -16,6 +68,7 @@ class Stage:
     callers: dict[str, CallerAgent]
     approve: Callable[[str, list[str]], dict[str, Any]]
     join: Callable[[str], dict[str, Any]]
+    ivr: IVR | None = None
 
 
 @dataclass
@@ -34,18 +87,103 @@ class Scenario:
     check: str  # which check it showcases
     expect: list[str]
     run: Callable[[Stage, str], Awaitable[list[tuple[str, Any]]]]
+    lane: str = "agent"  # agent (A2A) | phone (voice)
 
 
 def new_session(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex[:6]}"
 
 
-def phone(stage: Stage, challenge_id: str | None, methods: list[str], label: str) -> tuple[str, Step]:
+def phone(stage: Stage, challenge_id: str | None, methods: list[str], label: str,
+          who: str = "Riya's phone") -> tuple[str, Step]:
     res = stage.approve(challenge_id or "", methods)
     c = res["challenge"]
     outcome = "approved" if c["status"] == "approved" else "needs_more"
-    return label, Step(reply=f"Riya's phone: {res['message']} (strength {c['strength']} of {c['required_strength']})",
+    return label, Step(reply=f"{who}: {res['message']} (strength {c['strength']} of {c['required_strength']})",
                        outcome=outcome, payload={"challenge": c})
+
+
+# --------------------------------------------------------------------------- phone lane
+
+HUMAN = {"attestation": "A", "ai_voice_score": 0.04}
+
+
+async def phone_person(st: Stage, tag: str):
+    ivr, call = st.ivr, new_session("call")
+    who = ivr.verify("P-1001", "1991-04-18")
+    status = await ivr.turn(call, intent="appointment_status", params={"appointment_id": "APT-501"}, signals=HUMAN,
+                            verification=who, tag=tag,
+                            extra={"transcript": "Hi, it's Riya, checking my appointment",
+                                   "recording_url": "gs://ivr/call.wav"})
+    params = {"appointment_id": "APT-501", "reason": "travelling"}
+    ask = await ivr.turn(call, intent="cancel_appointment", params=params, signals=HUMAN, verification=who, tag=tag)
+    approve = phone(st, ask.challenge_id, ["keypad_pin", "sms_code"], "Riya keys in her PIN and the SMS code",
+                    who="Riya on the call")
+    done = await ivr.turn(call, intent="cancel_appointment", params=params, signals=HUMAN, verification=who,
+                          step_up=ask.challenge_id, tag=tag)
+    return [("Riya calls; the IVR verifies her and checks her appointment (transcript and audio sent, both dropped)",
+             status),
+            ("She asks to cancel (binding tier)", ask), approve, ("The IVR resends with the approval", done)]
+
+
+async def phone_honest(st: Stage, tag: str):
+    ivr, call = st.ivr, new_session("call")
+    who = ivr.verify("P-1001", "1991-04-18")
+    signals = {"attestation": "B", "ai_voice_score": 0.97, "declared_agent": True}
+    params = {"appointment_id": "APT-501", "new_slot": "2026-11-13T11:00"}
+    ask = await ivr.turn(call, intent="reschedule_appointment", params=params, signals=signals, verification=who,
+                         tag=tag)
+    lane = ask.lane or {}
+    pending = lane.get("pending") or {"intent": "reschedule_appointment", "params": params}
+    switched = await st.callers["riya"].send(intent=pending["intent"], params=pending["params"],
+                                             lane_code=lane.get("code"), session=new_session("lane"), tag=tag)
+    return [("Riya's assistant phones the clinic and presses 1: “I'm an AI agent”", ask),
+            (f"It switches to the agent lane with its passport and code {lane.get('code', '?')}", switched)]
+
+
+async def phone_pretender(st: Stage, tag: str):
+    ivr, call = st.ivr, new_session("call")
+    who = ivr.verify("P-1001", "1991-04-18")  # it knows Riya's details
+    sneaky = {"attestation": "A", "ai_voice_score": 0.94}
+    ask = await ivr.turn(call, intent="appointment_status", params={"appointment_id": "APT-501"}, signals=sneaky,
+                         verification=who, tag=tag)
+    cloned = phone(st, ask.challenge_id, ["voice_liveness"], "It answers the challenge with a cloned voice",
+                   who="On the call")
+    honest = await ivr.turn(call, intent="appointment_status", params={"appointment_id": "APT-501"},
+                            signals={**sneaky, "declared_agent": True}, verification=who, tag=tag)
+    return [("An agent with Riya's details calls, sounding human, and asks about her appointment", ask), cloned,
+            ("It gives up and presses 1: the agent lane is offered, nothing more", honest)]
+
+
+async def phone_speech_device(st: Stage, tag: str):
+    ivr, call = st.ivr, new_session("call")
+    who = ivr.verify("P-2002", "1984-09-02")
+    signals = {"attestation": "A", "ai_voice_score": 0.91}  # a person speaking through a speech-generating device
+    params = {"appointment_id": "APT-777"}
+    ask = await ivr.turn(call, intent="appointment_status", params=params, signals=signals, verification=who, tag=tag)
+    approve = phone(st, ask.challenge_id, ["keypad_pin", "sms_code"], "Vikram keys in his PIN and the SMS code",
+                    who="Vikram on the call")
+    done = await ivr.turn(call, intent="appointment_status", params=params, signals=signals, verification=who,
+                          step_up=ask.challenge_id, tag=tag)
+    return [("Vikram calls using a speech-generating device; the detector flags an AI voice", ask), approve,
+            ("He's served as himself", done)]
+
+
+async def phone_carrier(st: Stage, tag: str):
+    ivr = st.ivr
+    strong = await ivr.turn(new_session("call"), intent="appointment_status", params={"appointment_id": "APT-501"},
+                            signals={"attestation": "A", "ai_voice_score": 0.02}, tag=tag)
+    who = ivr.verify("P-1001", "1991-04-18")
+    call = new_session("call")
+    weak = {"attestation": "C", "ai_voice_score": 0.05}
+    read = await ivr.turn(call, intent="appointment_status", params={"appointment_id": "APT-501"}, signals=weak,
+                          verification=who, tag=tag)
+    write = await ivr.turn(call, intent="reschedule_appointment",
+                           params={"appointment_id": "APT-501", "new_slot": "2026-11-14T12:30"}, signals=weak,
+                           verification=who, tag=tag)
+    return [("A fully attested number, but the caller hasn't been verified", strong),
+            ("A verified caller on a number the carrier couldn't attest: reading is fine", read),
+            ("…changing the booking needs step-up", write)]
 
 
 async def open_tier(st: Stage, tag: str):
@@ -222,11 +360,34 @@ SCENARIOS: list[Scenario] = [
              "escalation", ["completed", "completed", "completed", "escalated"], loop),
 ]
 
+SCENARIOS += [
+    Scenario("phone_person", "Phone: a person calls",
+             "Riya calls the clinic. The IVR verifies her, and she cancels with her PIN and an SMS code. "
+             "The transcript and recording the platform sent are dropped.",
+             "identity", ["completed", "step_up_required", "approved", "completed"], phone_person, lane="phone"),
+    Scenario("phone_honest", "Phone: an agent that says so switches lanes",
+             "Riya's assistant phones and presses 1. It's offered a lane code, switches to A2A with its passport "
+             "and finishes the request there.",
+             "protocol", ["step_up_required", "completed"], phone_honest, lane="phone"),
+    Scenario("phone_pretender", "Phone: an agent pretending to be human",
+             "It knows Riya's details and sounds human. The detector adds friction, a cloned voice can't pass it, "
+             "and pretending gets it nothing.",
+             "step_up", ["step_up_required", "needs_more", "step_up_required"], phone_pretender, lane="phone"),
+    Scenario("phone_speech_device", "Phone: a person using a speech device",
+             "The detector flags Vikram's synthetic voice. He hears exactly what anyone would, passes with his "
+             "keypad and SMS code, and is served as himself.",
+             "step_up", ["step_up_required", "approved", "completed"], phone_speech_device, lane="phone"),
+    Scenario("phone_carrier", "Phone: carrier signals restrict, never grant",
+             "A perfectly attested number doesn't replace verification. A weakly attested one adds step-up for "
+             "changes, not for reading.",
+             "identity", ["denied", "completed", "step_up_required"], phone_carrier, lane="phone"),
+]
+
 BY_ID = {s.id: s for s in SCENARIOS}
 
 
 def describe() -> list[dict[str, Any]]:
-    return [{"id": s.id, "title": s.title, "story": s.story, "check": s.check, "expect": s.expect}
+    return [{"id": s.id, "title": s.title, "story": s.story, "check": s.check, "expect": s.expect, "lane": s.lane}
             for s in SCENARIOS]
 
 

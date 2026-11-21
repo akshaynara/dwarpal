@@ -50,9 +50,11 @@ def action_summary(rule: IntentRule | None, params: dict[str, Any]) -> str:
 
 
 def customer_message(policy: Policy, outcome: str, *, intent: str | None, reason: str | None,
-                     fields: dict[str, Any]) -> str:
-    keys = [k for k in (f"{outcome}.{intent}" if intent else None, f"{outcome}.{reason}" if reason else None,
+                     fields: dict[str, Any], channel: str = "a2a") -> str:
+    base = [k for k in (f"{outcome}.{intent}" if intent else None, f"{outcome}.{reason}" if reason else None,
                         outcome) if k]
+    # Channel-specific wording first (e.g. "voice:step_up_required"), then the shared templates.
+    keys = ([f"{channel}:{k}" for k in base] if channel != "a2a" else []) + base
     template = next((policy.customer_messages[k] for k in keys if k in policy.customer_messages), None)
     if template is None:
         return ""

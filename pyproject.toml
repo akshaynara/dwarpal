@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "dwarpal"
-version = "0.2.0"
+version = "0.3.0"
 description = "Dwarpal (द्वारपाल): gate the action, not the caller. A policy and enforcement layer for AI agents calling a business, built on Google ADK and A2A."
 readme = "README.md"
 requires-python = ">=3.11"

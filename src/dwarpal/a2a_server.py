@@ -55,6 +55,7 @@ def parse_a2a_request(ctx: RequestContext) -> InboundRequest:
     proof = meta.get("dwarpal_proof") or headers.get("x-dwarpal-proof")
     return InboundRequest(session_id=ctx.context_id or "no-context", body=envelope, text=text,
                           passport=passport, proof=proof, step_up=meta.get("dwarpal_step_up"),
+                          lane_code=meta.get("dwarpal_lane_code"),
                           tag=meta.get("dwarpal_tag"))
 
 
@@ -76,6 +77,7 @@ class GatewayExecutor(AgentExecutor):
             "receipt": decision.receipt,
             "ticket_id": decision.ticket_id,
             "join_code": decision.join_code,
+            "continued_from_call": decision.continued_from_call,
             "step_up": decision.step_up,
             "audit_seq": decision.audit_seq,
         }
@@ -94,7 +96,7 @@ def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, An
                      "account actions need a Dwarpal agent passport from a trusted issuer with every request "
                      "signed, binding actions also need the customer's own approval, and contested matters go "
                      "to a person. Structured intents only."),
-        version="0.2.0",
+        version="0.3.0",
         provider=AgentProvider(organization=policy.business_name, url=public_url),
         supported_interfaces=[AgentInterface(url=f"{public_url.rstrip('/')}/a2a", protocol_binding="JSONRPC",
                                              protocol_version="1.0")],

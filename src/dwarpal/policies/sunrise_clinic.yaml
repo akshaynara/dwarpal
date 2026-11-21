@@ -89,6 +89,28 @@ step_up:
     keypad_pin:    {label: "Clinic PIN on the keypad", strength: 1, accessible: true}
     voice_liveness: {label: "Voiceprint with liveness check", strength: 1, accessible: false}
 
+# Phone calls. Voice stays the default channel for years, so the same actions and tiers apply.
+# The business's own voice platform (IVR / CX Agent Studio) calls the gateway with what it knows.
+#
+# Proof grants:
+#   - The IVR's verification of the patient (e.g. patient id + date of birth) is the phone
+#     equivalent of a passport for account-tier actions, exactly as at the front desk today.
+#   - Binding actions still need step-up, which always has a path that needs no speech.
+# Signals restrict, never grant:
+#   - AI voice detected, caller hasn't said so  -> account-tier actions also need step-up
+#   - caller says it is an AI agent              -> it's offered the agent lane (bring a passport);
+#                                                   on the call, account-tier actions need step-up
+#   - carrier attestation weak or missing        -> account-tier writes need step-up
+#   A strong signal never skips a check, and no signal ever blocks a caller outright.
+voice:
+  verified_scopes: [appointments:read, appointments:write, billing:write]
+  max_amount_inr: 1500
+  ai_voice_threshold: 0.8
+  low_attestation: [C, none]
+  lane_code_ttl_seconds: 600
+  # Never stored, even if the voice platform sends it. Scores only.
+  drop_fields: [audio, recording_url, transcript, utterance_audio]
+
 # Guards against runaway or adversarial agent loops.
 limits:
   max_turns_per_session: 8            # requests per A2A context before a human takes over
@@ -128,6 +150,13 @@ customer_messages:
   escalated: "A member of our team will contact you about this by {expected_by_human}. Your reference is {ticket_id}, and your join code is {join_code}."
   escalated.repeat: "Your case {ticket_id} is already with our team. They'll contact you by {expected_by_human}."
   needs_structure: "Your assistant is talking to Sunrise Family Clinic's automated desk."
+  # Spoken on a phone call (tried first on the voice channel). Never tell a caller they "sound like a
+  # bot": a person using a speech device must hear exactly what anyone else hears.
+  voice:step_up_required: "For your security, please enter your clinic PIN on the keypad. We're also sending a code to your registered number."
+  voice:step_up_required.declared_agent: "Thanks for telling us you're an automated assistant. You can continue faster in our agent lane with code {lane_code_spoken}. Otherwise, the patient will need to confirm on their own phone."
+  voice:denied.needs_verification: "Before I can help with that, I need to confirm who's calling. Please give your patient ID and date of birth."
+  voice:denied.security: "I'm not able to help with that on this call. Please contact {contact}."
+  voice:escalated: "I'm passing this to a member of our team. They'll call you back by {expected_by_human}. Your reference is {ticket_id}."
 
 # Fields the business agent must never send back to an agent, whatever it was asked.
 data_policy:

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
+import os
+import secrets
 from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
@@ -13,7 +16,7 @@ import httpx
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -36,6 +39,7 @@ from .messages import message_hash
 from .policy import TIER_LABELS, Policy
 from .shield import ModelArmorClient, Shield
 from .stepup import StepUpService
+from .voice import LaneService, VoiceContext, sanitise
 
 log = logging.getLogger("dwarpal")
 
@@ -49,6 +53,7 @@ class Runtime:
     world: DemoWorld
     trust: TrustStore
     live: dict[str, dict[str, Any]] = field(default_factory=dict)  # challenge id -> pending live request
+    channel_key: str = ""  # shared secret for the business's own voice platform
 
     # The patient's device approving a step-up. In production this is the identity provider calling
     # back (OpenID CIBA); here the dashboard's phone card and the demo scenarios call it.
@@ -108,8 +113,19 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
         audit=audit,
         backend=ADKBackend(agent, fallback),
         events=EventBus(),
+        lanes=LaneService(policy.voice),
     )
-    return Runtime(settings=settings, policy=policy, gateway=gateway, service=service, world=world, trust=trust)
+    key_file = settings.data_dir / "channel.key"
+    channel_key = os.getenv("DWARPAL_CHANNEL_KEY") or (key_file.read_text().strip() if key_file.exists() else "")
+    if not channel_key:
+        channel_key = secrets.token_urlsafe(24)
+        key_file.write_text(channel_key)
+        try:
+            key_file.chmod(0o600)
+        except OSError:
+            pass
+    return Runtime(settings=settings, policy=policy, gateway=gateway, service=service, world=world, trust=trust,
+                   channel_key=channel_key)
 
 
 class ResolveBody(BaseModel):
@@ -123,6 +139,33 @@ class ApproveBody(BaseModel):
 class ReceiptCheckBody(BaseModel):
     receipt: str
     message: str | None = None
+
+
+class VoiceSignals(BaseModel):
+    attestation: str = "none"           # STIR/SHAKEN level from the carrier: A | B | C | none
+    ai_voice_score: float | None = None  # from an AI-voice / deepfake detection vendor, 0..1
+    declared_agent: bool = False         # caller pressed 1 or said it is an AI agent
+
+
+class VoiceVerification(BaseModel):
+    principal_id: str
+    name: str | None = None
+    method: str = "patient_id+dob"
+
+
+class VoiceTurn(BaseModel):
+    """One turn of a phone call, sent by the business's voice platform (IVR, CX Agent Studio tool/webhook)."""
+    model_config = {"extra": "allow"}
+    call_id: str
+    intent: str | None = None
+    params: dict[str, Any] = {}
+    signals: VoiceSignals = VoiceSignals()
+    verification: VoiceVerification | None = None  # set once the IVR has verified the patient
+    step_up: str | None = None
+
+
+VOICE_NEXT = {"completed": "continue", "rejected": "continue", "step_up_required": "collect_step_up",
+              "escalated": "transfer_to_person", "needs_structure": "continue", "error": "transfer_to_person"}
 
 
 class DeskActionBody(BaseModel):
@@ -219,6 +262,53 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {"appointments": rt.service.appointments_view(), "open_slots": rt.service.data["open_slots"],
                 "changes": rt.service.changes[-10:]}
 
+    # ---------------------------------------------------------------- phone lane
+
+    @app.post("/voice/turn")
+    async def voice_turn(raw: dict[str, Any], x_dwarpal_channel_key: str | None = Header(default=None)):
+        """The phone lane. Only the business's own voice platform may call this (channel key), because it
+        vouches for what the IVR verified. Callers never reach it directly."""
+        if not x_dwarpal_channel_key or not hmac.compare_digest(x_dwarpal_channel_key, rt.channel_key):
+            raise HTTPException(401, "Unknown voice channel.")
+        clean, dropped = sanitise(raw, rt.policy.voice)
+        try:
+            turn = VoiceTurn.model_validate(clean)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(422, str(exc)) from None
+        vc = VoiceContext(
+            call_id=turn.call_id, attestation=turn.signals.attestation, ai_voice_score=turn.signals.ai_voice_score,
+            declared_agent=turn.signals.declared_agent,
+            verified_principal=turn.verification.principal_id if turn.verification else None,
+            verified_name=turn.verification.name if turn.verification else None,
+            verification_method=turn.verification.method if turn.verification else None,
+            dropped_fields=dropped)
+        from .gateway import InboundRequest  # local import keeps app wiring readable
+
+        body = {"intent": turn.intent, "params": turn.params} if turn.intent else None
+        d = await gw.handle(InboundRequest(session_id=turn.call_id, body=body, channel="voice", voice=vc,
+                                           step_up=turn.step_up, tag=clean.get("tag")))
+        nxt = VOICE_NEXT.get(d.outcome, "continue")
+        if d.outcome == "denied" and (d.data or {}).get("error") == "needs_verification":
+            nxt = "verify_caller"
+        return {
+            "say": d.customer_message,             # spoken to the caller, written by the business
+            "next": nxt,
+            "reply": d.reply,                       # for the voice platform's logs, not spoken
+            "outcome": d.outcome,
+            "tier": d.tier,
+            "step_up": d.step_up,
+            "agent_lane": d.agent_lane,
+            "ticket_id": d.ticket_id,
+            "receipt": d.receipt,
+            "reason_codes": d.agent_outcome.get("reason_codes"),
+            "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in d.checks],
+            "request_id": d.request_id,
+        }
+
+    @app.get("/api/lanes")
+    async def lanes():
+        return {"lanes": gw.lanes.list()}
+
     # ---------------------------------------------------------------- customer side
 
     @app.get("/api/stepup")
@@ -297,8 +387,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _demo_guard()
         if scenario_id not in sc.BY_ID:
             raise HTTPException(404, "Unknown scenario")
+        rt.service.reset()  # every scenario starts from the same appointment book
         async with in_process_http() as http:
-            stage = sc.Stage(callers=rt.world.callers(http, s.public_url), approve=rt.approve, join=rt.join)
+            stage = sc.Stage(callers=rt.world.callers(http, s.public_url), approve=rt.approve, join=rt.join,
+                             ivr=sc.IVR(http, rt.channel_key, rt.service))
             result = await sc.run_scenario(scenario_id, stage)
         gw.events.publish({"type": "scenario_done", "scenario": {k: v for k, v in result.items() if k != "steps"}})
         return result
@@ -307,6 +399,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def live_start():
         """Stage moment: Riya's assistant asks to cancel; the audience watches Riya approve on her phone."""
         _demo_guard()
+        rt.service.reset()
         params = {"appointment_id": "APT-501", "reason": "Riya is travelling"}
         session = sc.new_session("live")
         async with in_process_http() as http:
@@ -345,6 +438,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gw.audit.reset()
         gw.escalations.clear()
         gw.stepup.clear()
+        gw.lanes.clear()
         gw.guard.sessions.clear()
         gw.guard._rate.clear()
         gw.history.clear()

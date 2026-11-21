@@ -13,4 +13,4 @@ needs (open, account, binding, human), and the gateway checks it the same way wh
   Audit       hash-chained, signed log; receipts that cover what the customer was told
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"

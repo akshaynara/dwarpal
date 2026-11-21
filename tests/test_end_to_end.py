@@ -23,7 +23,8 @@ def client(app):
 async def run(app, scenario_id):
     rt = app.state.runtime
     async with client(app) as http:
-        stage = sc.Stage(callers=rt.world.callers(http, BASE), approve=rt.approve, join=rt.join)
+        stage = sc.Stage(callers=rt.world.callers(http, BASE), approve=rt.approve, join=rt.join,
+                         ivr=sc.IVR(http, rt.channel_key, rt.service))
         return await sc.run_scenario(scenario_id, stage)
 
 

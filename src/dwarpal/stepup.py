@@ -47,7 +47,7 @@ class Challenge:
     summary: str
     action_hash: str
     required_strength: int
-    status: str = "pending"  # pending | approved | declined | used | expired
+    status: str = "pending"  # pending | approved | declined | used | expired | superseded
     factors: list[str] = field(default_factory=list)
     strength: int = 0
     approved_at: float | None = None
@@ -78,6 +78,10 @@ class StepUpService:
             action_hash=action_hash(principal_id, agent_id, intent, params),
             required_strength=self.policy.required_strength,
         )
+        # A newer request for the same action replaces an older pending one, so the customer sees one prompt.
+        for old in self.challenges.values():
+            if old.status == "pending" and old.agent_id == agent_id and old.action_hash == c.action_hash:
+                old.status = "superseded"
         self.challenges[c.id] = c
         return c
 
@@ -124,6 +128,16 @@ class StepUpService:
         if c.status == "approved":
             return "ok", c
         return c.status, c
+
+    def supersede(self, agent_id: str) -> list[str]:
+        """Withdraw pending approval requests from an agent (e.g. it switched from the phone to the agent lane),
+        so the customer isn't left with stale prompts."""
+        ids = []
+        for c in self.challenges.values():
+            if c.agent_id == agent_id and c.status == "pending":
+                c.status = "superseded"
+                ids.append(c.id)
+        return ids
 
     def consume(self, c: Challenge, request_id: str) -> None:
         c.status, c.used_by = "used", request_id
