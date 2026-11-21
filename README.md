@@ -62,7 +62,7 @@ It runs fully offline by default: the business agents are real ADK `LlmAgent`s w
 
 ```bash
 export GOOGLE_API_KEY=...                 # or GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT
-export DWARPAL_MODEL=gemini-flash-latest
+export DWARPAL_MODEL=gemini-2.5-flash
 dwarpal doctor                            # confirms a real Gemini round trip
 dwarpal serve
 ```
@@ -128,7 +128,7 @@ Demo mode trusts the demo identities and opens the dashboard. **Production mode*
 | `DWARPAL_ADMIN_TOKEN` | unset | Required in production |
 | `DWARPAL_IDP_KEY` | unset | Your identity provider's key for step-up callbacks |
 | `DWARPAL_CHANNEL_KEY` | generated | Your voice platform's key for `/voice/turn` |
-| `DWARPAL_LLM_MODE` / `DWARPAL_MODEL` | `auto` / `gemini-flash-latest` | Gemini when credentials exist, else scripted |
+| `DWARPAL_LLM_MODE` / `DWARPAL_MODEL` | `auto` / `gemini-2.5-flash` | Gemini when credentials exist, else scripted |
 | `DWARPAL_LLM_TIMEOUT` | `20` | Seconds to wait for Gemini before the scripted fallback answers |
 | `DWARPAL_BUSINESSES` | `clinic,payor` | Which businesses to mount |
 | `DWARPAL_POLICY` | built-in | Your policy file for the default business |

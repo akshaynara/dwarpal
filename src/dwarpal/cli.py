@@ -105,6 +105,7 @@ async def _doctor(live: bool) -> int:
 
     def add(status: str, name: str, detail: str) -> None:
         results.append((status, name, detail))
+        _line(status, name, detail)
 
     add("PASS" if sys.version_info >= (3, 11) else "FAIL", "Python", platform.python_version())
     add("PASS", "Dwarpal", __version__)
@@ -133,23 +134,37 @@ async def _doctor(live: bool) -> int:
         try:
             from google import genai
 
+            from google.genai import errors, types
+
             print(f"  ...   asking Gemini ({s.model}), up to {s.llm_timeout:g}s", flush=True)
             started = time.monotonic()
-            reply = await asyncio.wait_for(genai.Client().aio.models.generate_content(
+            # One attempt, so Google's own error shows instead of silent retries running out the clock.
+            client = genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
+            reply = await asyncio.wait_for(client.aio.models.generate_content(
                 model=s.model, contents="Reply with the word OK."), s.llm_timeout)
             add("PASS", "Gemini call",
                 f"{s.model} replied in {time.monotonic() - started:.1f}s: {(reply.text or '').strip()[:40]}")
         except TimeoutError:
-            add("FAIL", "Gemini call", f"no reply in {s.llm_timeout:g}s. Usually a VPN, office proxy or firewall "
-                "blocking generativelanguage.googleapis.com; try another network or turn the VPN off. "
+            add("FAIL", "Gemini call", f"no reply in {s.llm_timeout:g}s. Something on the network (a VPN, office "
+                "proxy or firewall) may be holding the request; try another network. "
+                "The demo still works: the scripted fallback answers.")
+            live_gemini_failed = True
+        except errors.APIError as exc:
+            hint = {503: f"Google says {s.model} is overloaded right now. Retry in a few minutes, or try another "
+                         "model, e.g. DWARPAL_MODEL=gemini-2.5-flash-lite.",
+                    429: "quota or rate limit reached for this key. Wait a minute, or check limits in AI Studio.",
+                    404: f"no model called {s.model} for this key. Run the models list and pick one.",
+                    400: "Google rejected the request; often an invalid key.",
+                    403: "this key isn't allowed to call Gemini (API disabled or key restricted)."}.get(exc.code, "")
+            add("FAIL", "Gemini call", f"HTTP {exc.code} {exc.status or ''}: {hint or str(exc.message)[:160]} "
                 "The demo still works: the scripted fallback answers.")
             live_gemini_failed = True
         except Exception as exc:  # noqa: BLE001
             add("FAIL", "Gemini call", f"{type(exc).__name__}: {str(exc)[:160]}")
             live_gemini_failed = True
     if live and live_gemini_failed:
-        add("WARN", "End-to-end scenario", "skipped: Gemini is unreachable. Run with DWARPAL_LLM_MODE=mock "
-            "to check the rest, or fix the network and retry.")
+        add("WARN", "End-to-end scenario", "skipped: Gemini didn't answer. Run with DWARPAL_LLM_MODE=mock "
+            "to check the rest, or retry once Gemini answers.")
         live = False
     if live:
         rt = app.state.runtimes.get("clinic") or next(iter(app.state.runtimes.values()))
@@ -173,10 +188,12 @@ async def _doctor(live: bool) -> int:
     return _report(results)
 
 
-def _report(results: list[tuple[str, str, str]]) -> int:
+def _line(status: str, name: str, detail: str) -> None:
     colour = {"PASS": "32", "WARN": "33", "FAIL": "31"}
-    for status, name, detail in results:
-        print(f"  {_c(colour[status], status):>4}  {name}: {detail}")
+    print(f"  {_c(colour[status], status):>4}  {name}: {detail}", flush=True)
+
+
+def _report(results: list[tuple[str, str, str]]) -> int:
     bad = sum(1 for r in results if r[0] == "FAIL")
     print(f"\n{'All good.' if not bad else f'{bad} problem(s) found.'}")
     return 1 if bad else 0

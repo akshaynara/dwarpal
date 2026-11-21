@@ -21,8 +21,11 @@ class GeminiJudge:
         if settings.use_gemini:
             try:
                 from google import genai
+                from google.genai import types
 
-                self._client = genai.Client()
+                # No silent SDK retries: if Gemini is busy, the shield falls back to rules at once.
+                self._client = genai.Client(
+                    http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
             except Exception as exc:  # noqa: BLE001
                 log.warning("Gemini client unavailable, falling back to rules only: %s", exc)
 
