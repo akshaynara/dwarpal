@@ -126,7 +126,7 @@ def build_runtime(settings: Settings | None = None, kit: BusinessKit = CLINIC) -
         escalations=EscalationQueue(store),
         stepup=StepUpService(policy.step_up, store),
         audit=audit,
-        backend=ADKBackend(agent, fallback),
+        backend=ADKBackend(agent, fallback, timeout=settings.llm_timeout if settings.use_gemini else None),
         events=EventBus(),
         lanes=LaneService(policy.voice, store),
     )

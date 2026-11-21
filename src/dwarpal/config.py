@@ -39,6 +39,8 @@ class Settings:
     idp_key: str | None = field(default_factory=lambda: os.getenv("DWARPAL_IDP_KEY") or None)
     state: str = field(default_factory=lambda: os.getenv("DWARPAL_STATE", "sqlite").lower())  # sqlite | memory
     model_armor_template: str | None = field(default_factory=lambda: os.getenv("DWARPAL_MODEL_ARMOR_TEMPLATE"))
+    # Seconds to wait for Gemini before the scripted fallback (agent) or rules only (shield) take over.
+    llm_timeout: float = field(default_factory=lambda: float(os.getenv("DWARPAL_LLM_TIMEOUT", "20")))
 
     @property
     def production(self) -> bool:

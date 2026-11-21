@@ -7,6 +7,7 @@ import asyncio
 import logging
 import os
 import sys
+import time
 
 STATUS_ICON = {"pass": "✔", "fail": "✘", "warn": "!", "handoff": "→", "skip": "·"}
 OUTCOME_COLOR = {"completed": "32", "rejected": "33", "denied": "31", "escalated": "35", "needs_structure": "36",
@@ -127,14 +128,29 @@ async def _doctor(live: bool) -> int:
     mode = s.resolved_llm_mode
     add("PASS", "LLM mode", f"{mode}" + (f" ({s.model})" if mode == "gemini" else
                                          ": offline scripted model. Set GOOGLE_API_KEY to use Gemini."))
+    live_gemini_failed = False
     if mode == "gemini":
         try:
             from google import genai
 
-            reply = await genai.Client().aio.models.generate_content(model=s.model, contents="Reply with the word OK.")
-            add("PASS", "Gemini call", f"{s.model} replied: {(reply.text or '').strip()[:40]}")
+            print(f"  ...   asking Gemini ({s.model}), up to {s.llm_timeout:g}s", flush=True)
+            started = time.monotonic()
+            reply = await asyncio.wait_for(genai.Client().aio.models.generate_content(
+                model=s.model, contents="Reply with the word OK."), s.llm_timeout)
+            add("PASS", "Gemini call",
+                f"{s.model} replied in {time.monotonic() - started:.1f}s: {(reply.text or '').strip()[:40]}")
+        except TimeoutError:
+            add("FAIL", "Gemini call", f"no reply in {s.llm_timeout:g}s. Usually a VPN, office proxy or firewall "
+                "blocking generativelanguage.googleapis.com; try another network or turn the VPN off. "
+                "The demo still works: the scripted fallback answers.")
+            live_gemini_failed = True
         except Exception as exc:  # noqa: BLE001
             add("FAIL", "Gemini call", f"{type(exc).__name__}: {str(exc)[:160]}")
+            live_gemini_failed = True
+    if live and live_gemini_failed:
+        add("WARN", "End-to-end scenario", "skipped: Gemini is unreachable. Run with DWARPAL_LLM_MODE=mock "
+            "to check the rest, or fix the network and retry.")
+        live = False
     if live:
         rt = app.state.runtimes.get("clinic") or next(iter(app.state.runtimes.values()))
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=s.public_url, timeout=120) as http:

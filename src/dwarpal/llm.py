@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -35,7 +36,7 @@ class GeminiJudge:
         try:
             from google.genai import types
 
-            resp = await self._client.aio.models.generate_content(
+            call = self._client.aio.models.generate_content(
                 model=self.settings.model,
                 contents=prompt,
                 config=types.GenerateContentConfig(
@@ -45,7 +46,8 @@ class GeminiJudge:
                     max_output_tokens=300,
                 ),
             )
+            resp = await asyncio.wait_for(call, min(self.settings.llm_timeout, 10))
             return json.loads(resp.text or "{}")
         except Exception as exc:  # noqa: BLE001
-            log.warning("Gemini judge failed, using rules only: %s", exc)
+            log.warning("Gemini judge failed, using rules only: %s", exc or type(exc).__name__)
             return None

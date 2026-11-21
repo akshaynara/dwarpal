@@ -7,7 +7,7 @@ dwarpal doctor          # installation, policies, audit chains, issuers, Gemini,
 dwarpal doctor --quick  # skip the scenario
 ```
 
-With `GOOGLE_API_KEY` set, the doctor makes a real Gemini call and runs a scenario through the Gemini-backed agent. If it reports "scripted fallback answered", Gemini failed and the offline model covered for it; the line above it says why (often a wrong model name or key).
+With `GOOGLE_API_KEY` set, the doctor makes a real Gemini call and runs a scenario through the Gemini-backed agent. If it reports "scripted fallback answered", Gemini failed and the offline model covered for it; the line above it says why (often a wrong model name or key). If it reports "no reply", something on the network (a VPN, office proxy or firewall) is blocking `generativelanguage.googleapis.com`; every Gemini call times out after `DWARPAL_LLM_TIMEOUT` seconds, so the gateway keeps answering with the fallback instead of hanging.
 
 ## Demo mode vs production mode
 

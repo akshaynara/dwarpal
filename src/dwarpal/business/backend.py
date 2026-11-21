@@ -10,6 +10,7 @@ intent, whitelisted parameters and the verified principal. The caller's raw text
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -64,8 +65,9 @@ class ADKBackend:
 
     APP = "dwarpal_business"
 
-    def __init__(self, agent: BaseAgent, fallback: BaseAgent | None = None):
+    def __init__(self, agent: BaseAgent, fallback: BaseAgent | None = None, timeout: float | None = None):
         self.agent = agent
+        self.timeout = timeout
         self.sessions = InMemorySessionService()
         self.runner = Runner(app_name=self.APP, agent=agent, session_service=self.sessions)
         self.fallback = fallback
@@ -75,11 +77,15 @@ class ADKBackend:
 
     async def run(self, task: BusinessTask) -> BusinessResult:
         try:
-            return await self._run(task, self.runner, self.agent)
-        except Exception as exc:  # noqa: BLE001
+            primary = self._run(task, self.runner, self.agent)
+            if self.timeout and self.fallback_runner:
+                return await asyncio.wait_for(primary, self.timeout)
+            return await primary
+        except Exception as exc:  # noqa: BLE001  (includes TimeoutError)
             if not self.fallback_runner:
                 raise
-            log.warning("Primary model failed (%s); answering with the scripted fallback.", exc)
+            reason = f"no reply in {self.timeout:g}s" if isinstance(exc, TimeoutError) else exc
+            log.warning("Primary model failed (%s); answering with the scripted fallback.", reason)
             result = await self._run(task, self.fallback_runner, self.fallback, fresh_session=True)
             result.fallback = True
             return result
