@@ -150,10 +150,10 @@ async def _doctor(live: bool) -> int:
                 "The demo still works: the scripted fallback answers.")
             live_gemini_failed = True
         except errors.APIError as exc:
-            hint = {503: f"Google says {s.model} is overloaded right now. Retry in a few minutes, or try another "
-                         "model, e.g. DWARPAL_MODEL=gemini-2.5-flash-lite.",
+            hint = {503: f"{s.model} is overloaded right now; checking other models below.",
                     429: "quota or rate limit reached for this key. Wait a minute, or check limits in AI Studio.",
-                    404: f"{s.model} isn't available to this key (Google retires models for new keys).",
+                    404: f"{s.model} isn't available to this key (Google retires models for new keys); "
+                         "checking other models below.",
                     400: "Google rejected the request; often an invalid key.",
                     403: "this key isn't allowed to call Gemini (API disabled or key restricted)."}.get(exc.code, "")
             add("FAIL", "Gemini call", f"HTTP {exc.code} {exc.status or ''}: Google says \"{str(exc.message)[:160]}\" "
