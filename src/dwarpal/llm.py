@@ -65,5 +65,6 @@ class GeminiJudge:
             resp = await asyncio.wait_for(call, min(self.settings.llm_timeout, 10))
             return json.loads(resp.text or "{}")
         except Exception as exc:  # noqa: BLE001
-            log.warning("Gemini judge failed, using rules only: %s", exc or type(exc).__name__)
+            reason = "no reply in time" if isinstance(exc, TimeoutError) else (str(exc) or type(exc).__name__)
+            log.warning("Gemini judge failed, using rules only: %s", reason)
             return None
