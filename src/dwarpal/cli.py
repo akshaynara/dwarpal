@@ -197,7 +197,7 @@ async def _doctor(live: bool) -> int:
 
 async def _find_working_model(client, failed: str) -> str | None:
     """Ask Google which Flash models this key can use, and return the first that actually answers."""
-    skip = ("image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview", "8b")
+    skip = ("image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview", "8b", "omni")
     try:
         names = [m.name.removeprefix("models/") async for m in await client.aio.models.list()
                  if "generateContent" in (m.supported_actions or []) and "flash" in (m.name or "")]
@@ -211,9 +211,14 @@ async def _find_working_model(client, failed: str) -> str | None:
     for name in candidates:
         try:
             await asyncio.wait_for(client.aio.models.generate_content(model=name, contents="Reply with OK."), 10)
+            print(f"        {name}: answered", flush=True)
             return name
-        except Exception:  # noqa: BLE001
-            continue
+        except TimeoutError:
+            print(f"        {name}: no reply in 10s", flush=True)
+        except Exception as exc:  # noqa: BLE001
+            code = getattr(exc, "code", "")
+            msg = str(getattr(exc, "message", "") or exc)[:110]
+            print(f"        {name}: {code} {msg}".rstrip(), flush=True)
     return None
 
 
