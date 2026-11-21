@@ -1,0 +1,117 @@
+# Dwarpal policy for a payor: providers' AI agents asking about prior authorisations and eligibility.
+# Same engine as the clinic, different business. Gate the action, not the caller.
+
+business:
+  id: payor.brightline.example
+  name: Brightline Health Plan
+  description: Provider-services desk for prior-authorisation status and eligibility.
+  contact: Brightline provider services
+
+# Provider credentials: an issuer that vouches for which provider organisation (NPI) an agent acts for.
+trusted_issuers:
+  - id: idp.providerpass.example
+    label: ProviderPass credentialing
+
+intents:
+  pa_requirements:
+    tier: open                      # payors publish their prior-auth lists
+    description: Does a CPT code need prior authorisation under a plan?
+    params: [cpt_code, plan]
+    summary: "check prior-auth rules for CPT {cpt_code}"
+  plan_contacts:
+    tier: open
+    description: Provider-services hours, prior-auth fax, how to submit.
+    params: [topic]
+    summary: "get provider-services contacts"
+  pa_status:
+    tier: account
+    description: Status of a prior authorisation this provider requested.
+    scope: pa:read
+    params: [auth_number, member_id, member_dob]
+    summary: "check prior authorisation {auth_number}"
+  eligibility_benefits:
+    tier: account
+    description: Eligibility and benefits for a member.
+    scope: eligibility:read
+    params: [member_id, member_dob, service_type]
+    summary: "check eligibility for member {member_id}"
+  pa_submit:
+    tier: human                     # needs clinical documents and a reviewer, not an agent conversation
+    description: Submit a new prior-authorisation request.
+    scope: pa:write
+    params: [member_id, cpt_code]
+    summary: "submit a prior-auth request for CPT {cpt_code}"
+    response_hours: 72
+  pa_appeal:
+    tier: human
+    description: Appeal a denial or request a peer-to-peer review.
+    scope: pa:write
+    params: [auth_number, reason]
+    summary: "appeal prior authorisation {auth_number}"
+    response_hours: 72
+
+# Which rails each plan has, tried in order. Fragmentation is configuration, not code.
+# CMS-0057-F requires FHIR prior-auth APIs for Medicare Advantage, Medicaid/CHIP managed care and
+# federal-exchange plans from 1 January 2027; commercial and self-funded employer plans aren't covered.
+rails:
+  MA:     {pa_status: [fhir_pas, x12_278], eligibility: [x12_270]}
+  PPO:    {pa_status: [x12_278],           eligibility: [x12_270]}
+  LEGACY: {pa_status: [],                  eligibility: []}       # no electronic inquiry: a person answers
+
+step_up:
+  required_strength: 2
+  ttl_seconds: 300
+  methods:
+    app_biometric: {label: "Approve in the practice admin's authenticator app", strength: 2, accessible: true}
+    sms_code:      {label: "Code sent to the practice's registered number", strength: 1, accessible: true}
+    keypad_pin:    {label: "Provider PIN on the keypad", strength: 1, accessible: true}
+    voice_liveness: {label: "Voiceprint with liveness check", strength: 1, accessible: false}
+
+# Payor phone lines verify providers by NPI and member details today; the IVR's verification is the
+# phone equivalent of a provider passport.
+voice:
+  verified_scopes: [pa:read, eligibility:read]
+  ai_voice_threshold: 0.8
+  low_attestation: [C, none]
+  lane_code_ttl_seconds: 600
+  drop_fields: [audio, recording_url, transcript, utterance_audio]
+
+limits:
+  max_turns_per_session: 12           # provider agents often check several auths in one session
+  max_cost_units_per_session: 30
+  max_requests_per_minute: 30
+  max_anonymous_requests_per_minute: 60
+  max_identical_requests: 3
+  max_denials_per_session: 3
+  max_note_chars: 400
+
+handoff:
+  default_response_hours: 8
+  runaway_response_hours: 4
+  join_code_ttl_hours: 72
+
+customer_messages:
+  completed.pa_requirements: "{answer}"
+  completed.plan_contacts: "{answer}"
+  completed.pa_status: "Prior authorisation {auth_number} for {service} is {status_label}. {valid} {action_needed}"
+  completed.eligibility_benefits: "Coverage for member {member} is {coverage} under {plan}. Copay: {copay}."
+  rejected: "We couldn't find that. {business_reason} You can also reach {contact}."
+  escalated: "A Brightline representative will follow up by {expected_by_human}. Reference {ticket_id}, join code {join_code}."
+  escalated.repeat: "Case {ticket_id} is already with a representative. They'll follow up by {expected_by_human}."
+  escalated.business_handoff: "{business_reason} Expect an answer by {expected_by_human}. Reference {ticket_id}, join code {join_code}."
+  denied.insufficient_scope: "This agent isn't credentialed to {action_summary} for your practice. Contact {contact}."
+  denied.security: "We couldn't complete this request through your agent. Please contact {contact}."
+  denied.identity: "We couldn't confirm which provider this request is from. Please contact {contact}."
+  denied.missing_passport: "Your agent needs a provider credential before it can {action_summary}."
+  denied: "We couldn't complete this request. Please contact {contact}."
+  step_up_required: "Brightline needs your practice admin to approve: {action_summary}."
+  needs_structure: "Your agent is talking to Brightline's automated provider desk."
+  voice:step_up_required: "For security, please enter your provider PIN on the keypad. We're also texting a code to your practice's registered number."
+  voice:step_up_required.declared_agent: "Thanks for telling us you're an automated assistant. Continue faster in our agent lane with code {lane_code_spoken}."
+  voice:denied.needs_verification: "Before I can help, please give your NPI, the member ID and the member's date of birth."
+
+data_policy:
+  never_disclose_fields: [diagnosis, ssn, address, member_name, clinical_notes, dob]
+  redact_patterns:
+    ssn: '(?<!\d)\d{3}-\d{2}-\d{4}(?!\d)'
+    email: '[\w.+-]+@[\w-]+\.[\w.-]+'

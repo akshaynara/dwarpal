@@ -26,49 +26,49 @@ def cmd_serve(args: argparse.Namespace) -> None:
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
 
 
-async def _demo(only: list[str] | None, verbose: bool) -> int:
+async def _demo(only: list[str] | None, verbose: bool, businesses: list[str] | None) -> int:
     import httpx
 
-    from .app import create_app
+    from .app import create_app, stage_for
     from .demo import scenarios as sc
 
-    app = create_app()
-    rt = app.state.runtime
-    print(_c("1", f"\nDwarpal demo · {rt.policy.business_name} · LLM: {rt.settings.resolved_llm_mode}\n"))
+    app = create_app(businesses=businesses)
     failures = 0
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=rt.settings.public_url,
-                                 timeout=120) as http:
-        for scenario in sc.SCENARIOS:
-            if only and scenario.id not in only:
-                continue
-            rt.service.reset()
-            stage = sc.Stage(callers=rt.world.callers(http, rt.settings.public_url), approve=rt.approve, join=rt.join,
-                             ivr=sc.IVR(http, rt.channel_key, rt.service))
-            result = await sc.run_scenario(scenario.id, stage)
-            ok = result["as_expected"]
-            failures += 0 if ok else 1
-            print(_c("1", f"▶ {scenario.title}") + ("" if ok else _c("31", "  (unexpected outcome)")))
-            print(f"  {scenario.story}")
-            for step in result["steps"]:
-                outcome = step["outcome"]
-                print(f"   • {step['label']}")
-                print(f"     {_c(OUTCOME_COLOR.get(outcome, '0'), outcome.upper())}  {step['reply']}")
-                cm = step["payload"].get("customer_message")
-                if cm and (verbose or outcome not in {"completed"}):
-                    print(f"     {'caller hears' if 'say' in step['payload'] else 'customer hears'}: “{cm}”")
-                for chk in step["payload"].get("checks", []):
-                    if verbose or chk["status"] in {"fail", "handoff"}:
-                        print(f"       {STATUS_ICON.get(chk['status'], '?')} {chk['name']}: {chk['detail']}")
-            print()
-    verdict = rt.gateway.audit.verify()
-    print(_c("1", "Audit chain: ") + (_c("32", f"intact, {verdict['count']} signed records")
-                                      if verdict["ok"] else _c("31", f"BROKEN at #{verdict['broken_at']}")))
-    print(f"Human queue: {len(rt.gateway.escalations.tickets)} ticket(s)\n")
+    for rt in app.state.runtimes.values():
+        todo = [x for x in rt.kit.scenarios if not only or x.id in only]
+        if not todo:
+            continue
+        print(_c("1", f"\n══ {rt.policy.business_name} · LLM: {rt.settings.resolved_llm_mode} ══\n"))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=rt.settings.public_url,
+                                     timeout=120) as http:
+            for scenario in todo:
+                rt.service.reset()
+                result = await sc.run_scenario(scenario.id, stage_for(rt, http), rt.kit.scenarios)
+                ok = result["as_expected"]
+                failures += 0 if ok else 1
+                print(_c("1", f"▶ {scenario.title}") + ("" if ok else _c("31", "  (unexpected outcome)")))
+                print(f"  {scenario.story}")
+                for step in result["steps"]:
+                    outcome = step["outcome"]
+                    print(f"   • {step['label']}")
+                    print(f"     {_c(OUTCOME_COLOR.get(outcome, '0'), outcome.upper())}  {step['reply']}")
+                    cm = step["payload"].get("customer_message")
+                    if cm and (verbose or outcome not in {"completed"}):
+                        print(f"     {'caller hears' if 'say' in step['payload'] else 'customer hears'}: “{cm}”")
+                    for chk in step["payload"].get("checks", []):
+                        if verbose or chk["status"] in {"fail", "handoff"}:
+                            print(f"       {STATUS_ICON.get(chk['status'], '?')} {chk['name']}: {chk['detail']}")
+                print()
+        verdict = rt.gateway.audit.verify()
+        print(_c("1", "Audit chain: ") + (_c("32", f"intact, {verdict['count']} signed records")
+                                          if verdict["ok"] else _c("31", f"BROKEN at #{verdict['broken_at']}")))
+        print(f"Human queue: {len(rt.gateway.escalations.tickets)} ticket(s)")
+    print()
     return 1 if failures else 0
 
 
 def cmd_demo(args: argparse.Namespace) -> None:
-    sys.exit(asyncio.run(_demo(args.only, args.verbose)))
+    sys.exit(asyncio.run(_demo(args.only, args.verbose, args.business)))
 
 
 def cmd_verify(args: argparse.Namespace) -> None:
@@ -90,6 +90,7 @@ def main() -> None:
     d = sub.add_parser("demo", help="Run the demo scenarios in the terminal.")
     d.add_argument("--only", nargs="*", help="Scenario ids to run.")
     d.add_argument("-v", "--verbose", action="store_true", help="Show every check, not just failures.")
+    d.add_argument("--business", nargs="*", help="Businesses to run (clinic, payor). Default: all.")
     d.set_defaults(func=cmd_demo)
     v = sub.add_parser("verify-audit", help="Verify the audit hash chain and signatures.")
     v.set_defaults(func=cmd_verify)

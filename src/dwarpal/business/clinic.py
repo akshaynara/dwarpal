@@ -7,15 +7,10 @@ passport, never from anything the caller typed.
 
 from __future__ import annotations
 
-import json
-import re
-from typing import AsyncGenerator
-
 from google.adk.agents import LlmAgent
-from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.adk.tools import ToolContext
-from google.genai import types
 
+from .scripted import ScriptedModel
 from .service import Actor, ClinicService
 
 
@@ -80,44 +75,13 @@ Rules:
 - Reply in one or two short, factual sentences."""
 
 
-class ScriptedClinicModel(BaseLlm):
-    """Deterministic stand-in for Gemini so the ADK agent runs offline and on stage.
-
-    It reads the gateway's verified task, calls the matching tool, then reports the tool's message.
-    """
-
-    async def generate_content_async(self, llm_request: LlmRequest, stream: bool = False
-                                     ) -> AsyncGenerator[LlmResponse, None]:
-        last = llm_request.contents[-1] if llm_request.contents else None
-        responses = [p.function_response for p in (last.parts or [])] if last else []
-        responses = [r for r in responses if r]
-        if responses:
-            result = responses[-1].response or {}
-            text = result.get("message") or json.dumps(result)
-            yield LlmResponse(content=types.Content(role="model", parts=[types.Part(text=text)]))
-            return
-        task = "".join(p.text or "" for p in (last.parts or [])) if last else ""
-        intent = (re.search(r"^intent:\s*(\S+)", task, re.M) or [None, ""])[1]
-        params_match = re.search(r"^params:\s*(\{.*\})\s*$", task, re.M)
-        params = json.loads(params_match.group(1)) if params_match else {}
-        tool = INTENT_TO_TOOL.get(intent)
-        if not tool:
-            yield LlmResponse(content=types.Content(role="model", parts=[
-                types.Part(text="I can't help with that request here.")]))
-            return
-        if tool == "clinic_info":
-            params.setdefault("topic", "hours")
-        if tool == "cancel_appointment":
-            params.setdefault("reason", "")
-        yield LlmResponse(content=types.Content(role="model", parts=[
-            types.Part(function_call=types.FunctionCall(name=tool, args=params))]))
-
-
 def build_clinic_agent(service: ClinicService, *, use_gemini: bool, model: str) -> LlmAgent:
     return LlmAgent(
         name="sunrise_front_desk",
         description="Front-desk agent for Sunrise Family Clinic (appointments and co-pays).",
-        model=model if use_gemini else ScriptedClinicModel(model="scripted-clinic"),
+        model=model if use_gemini else ScriptedModel(model="scripted-clinic", intent_map=INTENT_TO_TOOL,
+                                                     defaults={"clinic_info": {"topic": "hours"},
+                                                               "cancel_appointment": {"reason": ""}}),
         instruction=INSTRUCTION,
         tools=build_tools(service),
     )

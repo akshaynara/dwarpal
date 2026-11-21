@@ -182,6 +182,16 @@ class ClinicService:
 
     # ------------------------------------------------------------------ views
 
+    def records_view(self) -> dict[str, Any]:
+        rows = [[a["id"], a["patient"], human_slot(a["slot"]), a["status"] + (", refunded" if a["copay_refunded"] else "")]
+                for a in self.appointments_view()]
+        last = self.changes[-1] if self.changes else None
+        return {"title": "Clinic appointments", "columns": ["Id", "Patient", "Slot", "Status"], "rows": rows,
+                "last_change": (f"Last change: {last['action'].replace('_', ' ')} by {last['actor']} "
+                                f"({'AI agent' if last['channel'] == 'agent' else 'staff'}), through the same service "
+                                "the front desk uses." if last else
+                                "AI agents and staff both change bookings through the same service.")}
+
     def appointments_view(self) -> list[dict[str, Any]]:
         return [{"id": apt_id, "patient": self.data["patients"][a["patient_id"]]["name"], **a}
                 for apt_id, a in self.data["appointments"].items()]

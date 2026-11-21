@@ -14,7 +14,6 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from ..business.service import ClinicService
 from .callers import CallerAgent
 
 
@@ -42,21 +41,20 @@ class IVR:
     endpoint on each turn, along with carrier attestation and a detection vendor's AI-voice score. It is
     business-side, so it may look up records; callers never can."""
 
-    def __init__(self, http: httpx.AsyncClient, channel_key: str, service: ClinicService):
-        self.http, self.key, self.service = http, channel_key, service
+    def __init__(self, http: httpx.AsyncClient, channel_key: str,
+                 verify: Callable[..., dict[str, str] | None], path: str = "/voice/turn"):
+        self.http, self.key, self._verify, self.path = http, channel_key, verify, path
 
-    def verify(self, patient_id: str, dob: str) -> dict[str, str] | None:
-        p = self.service.data["patients"].get(patient_id)
-        if p and p["dob"] == dob:
-            return {"principal_id": patient_id, "name": p["name"], "method": "patient_id+dob"}
-        return None
+    def verify(self, *details: str) -> dict[str, str] | None:
+        """The business's own verification (patient id + DOB at a clinic, NPI + member details at a payor)."""
+        return self._verify(*details)
 
     async def turn(self, call_id: str, *, intent: str | None = None, params: dict[str, Any] | None = None,
                    signals: dict[str, Any] | None = None, verification: dict[str, str] | None = None,
                    step_up: str | None = None, extra: dict[str, Any] | None = None, tag: str | None = None) -> VoiceResult:
         body = {"call_id": call_id, "intent": intent, "params": params or {}, "signals": signals or {},
                 "verification": verification, "step_up": step_up, "tag": tag, **(extra or {})}
-        r = await self.http.post("/voice/turn", json=body, headers={"X-Dwarpal-Channel-Key": self.key})
+        r = await self.http.post(self.path, json=body, headers={"X-Dwarpal-Channel-Key": self.key})
         r.raise_for_status()
         data = r.json()
         data["customer_message"] = data.get("say", "")
@@ -386,17 +384,17 @@ SCENARIOS += [
 BY_ID = {s.id: s for s in SCENARIOS}
 
 
-def describe() -> list[dict[str, Any]]:
+def describe(scenarios: list[Scenario] | None = None) -> list[dict[str, Any]]:
     return [{"id": s.id, "title": s.title, "story": s.story, "check": s.check, "expect": s.expect, "lane": s.lane}
-            for s in SCENARIOS]
+            for s in (scenarios if scenarios is not None else SCENARIOS)]
 
 
 def _outcome(r: Any) -> str:
     return r.outcome
 
 
-async def run_scenario(scenario_id: str, stage: Stage) -> dict[str, Any]:
-    sc = BY_ID[scenario_id]
+async def run_scenario(scenario_id: str, stage: Stage, scenarios: list[Scenario] | None = None) -> dict[str, Any]:
+    sc = {s.id: s for s in scenarios}[scenario_id] if scenarios is not None else BY_ID[scenario_id]
     steps = await sc.run(stage, sc.id)
     outcomes = [_outcome(r) for _, r in steps]
     return {

@@ -116,6 +116,7 @@ class Decision:
     customer_message: str = ""  # for the customer, written by the business
     agent_outcome: dict[str, Any] = field(default_factory=dict)
     tier: str | None = None
+    summary: str = ""  # the action in plain words, e.g. "check prior authorisation PA-90001"
     agent: dict[str, Any] | None = None
     intent: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
@@ -241,7 +242,8 @@ class Gateway:
             kw.setdefault("agent", caller.info)
             return Decision(request_id=rid, session_id=req.session_id, outcome=outcome, checks=checks, reply=reply,
                             customer_message=cm, agent_outcome=ao, tier=rule.tier if rule else None,
-                            intent=intent, params=params, channel=req.channel, signals=signals, **kw)
+                            summary=action_summary(rule, params) if rule else "", intent=intent, params=params,
+                            channel=req.channel, signals=signals, **kw)
 
         # 1. Identity: required unless the action is open-tier -----------------------------
         continued: dict[str, Any] | None = None
@@ -475,8 +477,8 @@ class Gateway:
             checks.append(Check("escalation", "handoff",
                                 f"“{intent}” is human-only by policy. Ticket {ticket.id} opened with full context; "
                                 f"answer due by {_when(ticket.expected_by)}."))
-            return done("escalated", f"A person at {self.policy.business_name} handles "
-                                     f"{intent.replace('_', ' ')}. Ticket {ticket.id} is open.",
+            return done("escalated", f"A person at {self.policy.business_name} decides this "
+                                     f"({action_summary(rule, params)}). Ticket {ticket.id} is open.",
                         reason="human_only", ticket_id=ticket.id, **self._ticket_kw(ticket))
 
         # 7. Step-up: binding actions need the customer's own approval for this action ----
@@ -561,12 +563,34 @@ class Gateway:
         clean_data, r1 = filter_outbound(result.data, self.policy.data)
         clean_msg, r2 = filter_outbound(result.message, self.policy.data)
         redactions = r1 + r2
+        rail = clean_data.get("rail_label") or ("a person" if clean_data.get("rail") == "human" else None)
         checks.append(Check("data_guard", "warn" if redactions else "pass",
-                            "; ".join(redactions) if redactions else
-                            f"Response clean. Tools used: {result.tool_calls or 'none'}."
+                            ("; ".join(redactions).capitalize() + "." if redactions else
+                             f"Response clean. Tools used: {result.tool_calls or 'none'}.")
+                            + (f" Answered via {rail}." if rail else "")
                             + (" (Primary model unavailable: answered by the scripted fallback.)"
                                if result.fallback else "")))
         status = str(clean_data.get("status", "ok"))
+
+        # The business itself can say a person must answer (e.g. a payor plan with no electronic rail).
+        if status == "needs_human":
+            msg = str(clean_data.get("message", ""))
+            key = f"{intent}:{body_hash(params)}"
+            ticket = self.escalations.tickets.get(s.open_tickets.get(key, ""))
+            repeat = bool(ticket and ticket.status == "open")
+            if not repeat:
+                hours = float(clean_data.get("response_hours") or self.policy.handoff.default_response_hours)
+                ticket = self._open_ticket(s, caller, intent, params, "business_handoff", msg, "medium", hours)
+                s.open_tickets[key] = ticket.id
+            for c in checks:
+                if c.name == "escalation":
+                    c.status = "handoff"
+                    c.detail = (f"{self.policy.business_name} can't answer this automatically: {msg} "
+                                f"Ticket {ticket.id}, due {_when(ticket.expected_by)}.")
+            kw = self._ticket_kw(ticket, repeat=repeat)
+            kw["fields"]["business_reason"] = msg
+            return done("escalated", clean_msg or msg, reason="repeat" if repeat else "business_handoff",
+                        codes=["business_handoff"], ticket_id=ticket.id, data=clean_data, **kw)
         outcome = "rejected" if status in {"rejected", "not_found"} else "completed"
 
         # 10. Customer message, then a receipt that covers it ----------------------------

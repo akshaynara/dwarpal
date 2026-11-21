@@ -128,6 +128,12 @@ The business's voice platform calls `POST /voice/turn` on each turn, authenticat
 
 **Residual risk, stated plainly:** an agent that pretends to be human, isn't detected, and knows the patient's details gets what a human caller gets today: account-tier actions after IVR verification. Binding actions still need the patient's own step-up, which the agent can't complete. Detection quality, and moving sensitive reads to the binding tier in policy, are the levers for narrowing this.
 
+## Many businesses, one gateway
+
+Everything business-specific is plugged in as a kit (`businesses.py`): the policy file, the business service, the ADK agent in front of it, and the demo identities and scenarios. Each kit is mounted under its own prefix with its own A2A agent card (`{prefix}/.well-known/agent-card.json`), JSON-RPC endpoint, voice endpoint, signing key, audit chain and dashboard. A passport is bound to one business by its audience, so a credential for the clinic is useless at the payor.
+
+The business service can also decide that a person must answer (`status: needs_human`), for example a payor plan with no electronic rail. The gateway then opens a ticket with the service's due time and handles repeats exactly as for human-tier actions. See [The payor desk](payor-desk.md).
+
 ## Why ADK and A2A
 
 - **A2A** gives any caller agent a standard way to discover the gateway (agent card with each action's tier and the `agentPassport` scheme) and talk to it, whatever framework it was built with.

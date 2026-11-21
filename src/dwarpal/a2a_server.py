@@ -96,7 +96,7 @@ def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, An
                      "account actions need a Dwarpal agent passport from a trusted issuer with every request "
                      "signed, binding actions also need the customer's own approval, and contested matters go "
                      "to a person. Structured intents only."),
-        version="0.3.0",
+        version="0.4.0",
         provider=AgentProvider(organization=policy.business_name, url=public_url),
         supported_interfaces=[AgentInterface(url=f"{public_url.rstrip('/')}/a2a", protocol_binding="JSONRPC",
                                              protocol_version="1.0")],

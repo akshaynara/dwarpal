@@ -1,4 +1,5 @@
-"""Wires everything into one FastAPI app: the A2A gateway endpoint plus the demo dashboard API."""
+"""Wires everything into one FastAPI app. Each protected business is mounted under its own prefix with its
+own A2A agent card and endpoint, voice endpoint, dashboard API and dashboard."""
 
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ import httpx
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -24,11 +25,10 @@ from . import __version__
 from .a2a_server import GatewayExecutor, build_agent_card
 from .audit import AuditLog
 from .business.backend import ADKBackend
-from .business.clinic import build_clinic_agent
-from .business.service import Actor, ClinicService
+from .business.service import Actor
+from .businesses import CLINIC, KITS, BusinessKit
 from .config import Settings
 from .demo import scenarios as sc
-from .demo.world import DemoWorld
 from .escalation import EscalationQueue
 from .events import EventBus
 from .gateway import Gateway
@@ -47,10 +47,11 @@ log = logging.getLogger("dwarpal")
 @dataclass
 class Runtime:
     settings: Settings
+    kit: BusinessKit
     policy: Policy
     gateway: Gateway
-    service: ClinicService
-    world: DemoWorld
+    service: Any
+    world: Any
     trust: TrustStore
     live: dict[str, dict[str, Any]] = field(default_factory=dict)  # challenge id -> pending live request
     channel_key: str = ""  # shared secret for the business's own voice platform
@@ -79,29 +80,33 @@ class Runtime:
         return {"result": result, "ticket": t.to_dict() if t else None}
 
 
-def build_runtime(settings: Settings | None = None) -> Runtime:
+def build_runtime(settings: Settings | None = None, kit: BusinessKit = CLINIC) -> Runtime:
     settings = settings or Settings()
     # ADK logs a full traceback when a model call fails; the backend already falls back and logs one line.
     for noisy in ("google_adk", "google_genai"):
         logging.getLogger(noisy).setLevel(logging.CRITICAL)
-    settings.data_dir.mkdir(parents=True, exist_ok=True)
-    policy = Policy.load(settings.policy_path)
+    # The default business keeps the top-level data directory; others get a subfolder each.
+    data_dir = settings.data_dir if kit.prefix == "" else settings.data_dir / kit.slug
+    data_dir.mkdir(parents=True, exist_ok=True)
+    policy_path = settings.policy_path if (kit is CLINIC and settings.policy_path) else kit.policy_file
+    policy = Policy.load(policy_path)
 
     trust = TrustStore()
-    world = DemoWorld.load(settings.data_dir, policy.business_id)
+    world = kit.build_world(data_dir, policy.business_id)
     world.trust(trust)
 
-    gateway_key = KeyPair.load_or_create(settings.data_dir / "gateway.pem")
+    gateway_key = KeyPair.load_or_create(data_dir / "gateway.pem")
     judge = GeminiJudge(settings)
     armor = ModelArmorClient(settings.model_armor_template) if settings.model_armor_template else None
 
     # The business service is shared by the AI agent's tools and the human front desk.
     # The gateway never gets a reference to it.
-    service = ClinicService()
-    agent = build_clinic_agent(service, use_gemini=settings.use_gemini, model=settings.model)
-    fallback = build_clinic_agent(service, use_gemini=False, model="") if settings.use_gemini else None
-    audit = AuditLog(settings.data_dir / "audit.jsonl", gateway_key)
-    service.on_write = lambda change: audit.append("business_write", **change)
+    service = kit.build_service(policy)
+    agent = kit.build_agent(service, use_gemini=settings.use_gemini, model=settings.model)
+    fallback = kit.build_agent(service, use_gemini=False, model="") if settings.use_gemini else None
+    audit = AuditLog(data_dir / "audit.jsonl", gateway_key)
+    event = getattr(service, "audit_event", "business_write")
+    service.on_write = lambda change: audit.append(event, **change)
 
     gateway = Gateway(
         policy=policy,
@@ -115,7 +120,7 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
         events=EventBus(),
         lanes=LaneService(policy.voice),
     )
-    key_file = settings.data_dir / "channel.key"
+    key_file = data_dir / "channel.key"
     channel_key = os.getenv("DWARPAL_CHANNEL_KEY") or (key_file.read_text().strip() if key_file.exists() else "")
     if not channel_key:
         channel_key = secrets.token_urlsafe(24)
@@ -124,8 +129,8 @@ def build_runtime(settings: Settings | None = None) -> Runtime:
             key_file.chmod(0o600)
         except OSError:
             pass
-    return Runtime(settings=settings, policy=policy, gateway=gateway, service=service, world=world, trust=trust,
-                   channel_key=channel_key)
+    return Runtime(settings=settings, kit=kit, policy=policy, gateway=gateway, service=service, world=world,
+                   trust=trust, channel_key=channel_key)
 
 
 class ResolveBody(BaseModel):
@@ -177,19 +182,32 @@ class DeskActionBody(BaseModel):
     reason: str = ""
 
 
-def create_app(settings: Settings | None = None) -> FastAPI:
-    rt = build_runtime(settings)
-    s, gw = rt.settings, rt.gateway
+def create_app(settings: Settings | None = None, businesses: list[str] | None = None) -> FastAPI:
+    settings = settings or Settings()
+    slugs = businesses or [b.strip() for b in os.getenv("DWARPAL_BUSINESSES", "clinic,payor").split(",") if b.strip()]
     app = FastAPI(title="Dwarpal", version=__version__,
                   description="Gate the action, not the caller: a policy and enforcement layer for AI agents "
-                              "calling a business (Google ADK + A2A).")
-    app.state.runtime = rt
+                              "calling a business, on the phone or over A2A (Google ADK).")
+    runtimes = {slug: build_runtime(settings, KITS[slug]) for slug in slugs}
+    app.state.runtimes = runtimes
+    app.state.runtime = runtimes.get("clinic") or next(iter(runtimes.values()))
+    for rt in runtimes.values():
+        mount(app, rt, runtimes)
+    return app
 
-    card = build_agent_card(rt.policy, s.public_url, gw.catalog())
+
+def mount(app: FastAPI, rt: Runtime, runtimes: dict[str, Runtime]) -> None:
+    s, gw, kit = rt.settings, rt.gateway, rt.kit
+    prefix = kit.prefix
+    base_url = s.public_url.rstrip("/") + prefix
+    router = APIRouter(prefix=prefix)
+
+    card = build_agent_card(rt.policy, base_url, gw.catalog())
     handler = DefaultRequestHandler(agent_executor=GatewayExecutor(gw), task_store=InMemoryTaskStore(),
                                     agent_card=card)
-    add_a2a_routes_to_fastapi(app, agent_card_routes=create_agent_card_routes(card),
-                              jsonrpc_routes=create_jsonrpc_routes(handler, "/a2a"))
+    add_a2a_routes_to_fastapi(
+        app, agent_card_routes=create_agent_card_routes(card, card_url=f"{prefix}/.well-known/agent-card.json"),
+        jsonrpc_routes=create_jsonrpc_routes(handler, f"{prefix}/a2a"))
 
     def in_process_http() -> httpx.AsyncClient:
         """Demo callers make real A2A JSON-RPC calls to this same app, in process."""
@@ -197,11 +215,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- read-only API
 
-    @app.get("/api/info")
+    @router.get("/api/info")
     async def info():
         return {
             "version": __version__,
-            "business": {"id": rt.policy.business_id, "name": rt.policy.business_name},
+            "business": {"id": rt.policy.business_id, "name": rt.policy.business_name, "slug": kit.slug},
+            "businesses": [{"slug": r.kit.slug, "name": r.policy.business_name, "href": (r.kit.prefix or "") + "/"}
+                           for r in runtimes.values()],
+            "live": kit.live,
             "llm_mode": s.resolved_llm_mode, "model": s.model if s.use_gemini else "scripted (offline)",
             "shield_layers": ["rules"] + (["gemini"] if gw.shield.judge and gw.shield.judge.available else [])
                              + (["model_armor"] if gw.shield.model_armor else []),
@@ -214,19 +235,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "demo": s.enable_demo_endpoints,
         }
 
-    @app.get("/api/audit")
+    @router.get("/api/audit")
     async def audit(limit: int = 50):
         return {"records": gw.audit.records(limit), "verify": gw.audit.verify()}
 
-    @app.get("/api/audit/verify")
+    @router.get("/api/audit/verify")
     async def audit_verify():
         return gw.audit.verify()
 
-    @app.get("/api/escalations")
+    @router.get("/api/escalations")
     async def escalations():
         return {"tickets": gw.escalations.list()}
 
-    @app.post("/api/escalations/{ticket_id}/resolve")
+    @router.post("/api/escalations/{ticket_id}/resolve")
     async def resolve(ticket_id: str, body: ResolveBody):
         t = gw.escalations.resolve(ticket_id, body.resolution)
         if not t:
@@ -235,11 +256,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gw.events.publish({"type": "ticket", "ticket": t.to_dict()})
         return t.to_dict()
 
-    @app.get("/api/decisions")
+    @router.get("/api/decisions")
     async def decisions():
         return {"decisions": [e["decision"] for e in gw.events.history if e.get("type") == "decision"]}
 
-    @app.get("/api/events")
+    @router.get("/api/events")
     async def events():
         async def stream():
             yield "retry: 2000\n\n"
@@ -257,14 +278,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
-    @app.get("/api/clinic")
-    async def clinic():
-        return {"appointments": rt.service.appointments_view(), "open_slots": rt.service.data["open_slots"],
-                "changes": rt.service.changes[-10:]}
+    @router.get("/api/book")
+    async def book():
+        """The business's own records, for the dashboard."""
+        return rt.service.records_view()
 
     # ---------------------------------------------------------------- phone lane
 
-    @app.post("/voice/turn")
+    @router.post("/voice/turn")
     async def voice_turn(raw: dict[str, Any], x_dwarpal_channel_key: str | None = Header(default=None)):
         """The phone lane. Only the business's own voice platform may call this (channel key), because it
         vouches for what the IVR verified. Callers never reach it directly."""
@@ -305,32 +326,32 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "request_id": d.request_id,
         }
 
-    @app.get("/api/lanes")
+    @router.get("/api/lanes")
     async def lanes():
         return {"lanes": gw.lanes.list()}
 
     # ---------------------------------------------------------------- customer side
 
-    @app.get("/api/stepup")
+    @router.get("/api/stepup")
     async def stepup_list():
         return {"challenges": gw.stepup.list(), "methods": gw.stepup.methods_public(),
                 "required_strength": rt.policy.step_up.required_strength}
 
-    @app.post("/api/stepup/{challenge_id}/approve")
+    @router.post("/api/stepup/{challenge_id}/approve")
     async def stepup_approve(challenge_id: str, body: ApproveBody):
         try:
             return rt.approve(challenge_id, body.methods)
         except KeyError:
             raise HTTPException(404, "No such approval request") from None
 
-    @app.post("/api/stepup/{challenge_id}/decline")
+    @router.post("/api/stepup/{challenge_id}/decline")
     async def stepup_decline(challenge_id: str):
         try:
             return rt.decline(challenge_id)
         except KeyError:
             raise HTTPException(404, "No such approval request") from None
 
-    @app.post("/api/join/{code}")
+    @router.post("/api/join/{code}")
     async def join(code: str):
         res = rt.join(code)
         if res["result"] == "unknown":
@@ -342,7 +363,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": f"You're connected to case {t['id']}. The team already has your assistant's request, "
                            "so you won't need to explain it again."}
 
-    @app.post("/api/receipts/verify")
+    @router.post("/api/receipts/verify")
     async def receipt_verify(body: ReceiptCheckBody):
         """Check a receipt's signature and, optionally, whether a relayed message is what the business said."""
         try:
@@ -356,11 +377,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- staff side
 
-    @app.post("/api/desk/action")
+    @router.post("/api/desk/action", include_in_schema=kit.slug == "clinic")
     async def desk_action(body: DeskActionBody):
         """A person at the front desk acting through the same service the AI agent uses: same validation,
         same audit trail."""
         _demo_guard()
+        if kit.slug != "clinic":
+            raise HTTPException(404, "No staff desk for this business in the demo.")
         actor = Actor(channel="staff", id=body.staff_id)
         if body.action == "reschedule":
             res = rt.service.reschedule(actor, body.appointment_id, body.new_slot or "")
@@ -378,51 +401,51 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not s.enable_demo_endpoints:
             raise HTTPException(404, "Demo endpoints are disabled (DWARPAL_DEMO=false).")
 
-    @app.get("/api/scenarios")
+    @router.get("/api/scenarios")
     async def scenarios():
-        return {"scenarios": sc.describe()}
+        return {"scenarios": sc.describe(kit.scenarios)}
 
-    @app.post("/api/scenarios/{scenario_id}/run")
+    @router.post("/api/scenarios/{scenario_id}/run")
     async def run(scenario_id: str):
         _demo_guard()
-        if scenario_id not in sc.BY_ID:
+        if scenario_id not in {x.id for x in kit.scenarios}:
             raise HTTPException(404, "Unknown scenario")
-        rt.service.reset()  # every scenario starts from the same appointment book
+        rt.service.reset()  # every scenario starts from the same records
         async with in_process_http() as http:
-            stage = sc.Stage(callers=rt.world.callers(http, s.public_url), approve=rt.approve, join=rt.join,
-                             ivr=sc.IVR(http, rt.channel_key, rt.service))
-            result = await sc.run_scenario(scenario_id, stage)
+            result = await sc.run_scenario(scenario_id, stage_for(rt, http), kit.scenarios)
         gw.events.publish({"type": "scenario_done", "scenario": {k: v for k, v in result.items() if k != "steps"}})
         return result
 
-    @app.post("/api/live/start")
+    @router.post("/api/live/start")
     async def live_start():
+        if not kit.live:
+            raise HTTPException(404, "No live flow for this business.")
         """Stage moment: Riya's assistant asks to cancel; the audience watches Riya approve on her phone."""
         _demo_guard()
         rt.service.reset()
         params = {"appointment_id": "APT-501", "reason": "Riya is travelling"}
         session = sc.new_session("live")
         async with in_process_http() as http:
-            riya = rt.world.callers(http, s.public_url)["riya"]
+            riya = rt.world.callers(http, base_url)["riya"]
             res = await riya.send(intent="cancel_appointment", params=params, session=session, tag="live")
         cid = (res.payload.get("step_up") or {}).get("challenge_id")
         if cid:
             rt.live[cid] = {"session": session, "intent": "cancel_appointment", "params": params}
         return {"outcome": res.outcome, "challenge_id": cid, "customer_message": res.payload.get("customer_message")}
 
-    @app.post("/api/live/{challenge_id}/resume")
+    @router.post("/api/live/{challenge_id}/resume")
     async def live_resume(challenge_id: str):
         _demo_guard()
         pending = rt.live.pop(challenge_id, None)
         if not pending:
             raise HTTPException(404, "No live request waiting on that approval.")
         async with in_process_http() as http:
-            riya = rt.world.callers(http, s.public_url)["riya"]
+            riya = rt.world.callers(http, base_url)["riya"]
             res = await riya.send(intent=pending["intent"], params=pending["params"], session=pending["session"],
                                   step_up=challenge_id, tag="live")
         return {"outcome": res.outcome, "reply": res.reply, "customer_message": res.payload.get("customer_message")}
 
-    @app.post("/api/demo/tamper")
+    @router.post("/api/demo/tamper")
     async def tamper():
         _demo_guard()
         seq = gw.audit.tamper_for_demo()
@@ -430,7 +453,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         gw.events.publish({"type": "audit", "verify": verdict, "tampered_seq": seq})
         return {"tampered_seq": seq, "verify": verdict}
 
-    @app.post("/api/demo/reset")
+    @router.post("/api/demo/reset")
     async def reset():
         _demo_guard()
         rt.service.reset()
@@ -448,8 +471,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     # ---------------------------------------------------------------- dashboard
 
-    @app.get("/", response_class=HTMLResponse)
+    @router.get("/", response_class=HTMLResponse)
     async def dashboard():
         return resources.files("dwarpal.web").joinpath("index.html").read_text(encoding="utf-8")
 
-    return app
+    app.include_router(router)
+
+
+def stage_for(rt: Runtime, http: httpx.AsyncClient) -> sc.Stage:
+    """Everything a demo scenario needs to act out a business's story, all through real endpoints."""
+    base_url = rt.settings.public_url.rstrip("/") + rt.kit.prefix
+    return sc.Stage(callers=rt.world.callers(http, base_url), approve=rt.approve, join=rt.join,
+                    ivr=sc.IVR(http, rt.channel_key, rt.kit.ivr_verify(rt.service),
+                               path=f"{rt.kit.prefix}/voice/turn"))

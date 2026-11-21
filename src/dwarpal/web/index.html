@@ -51,6 +51,10 @@ header {
 .brand .deva { font: 30px/1 var(--deva); color: var(--brass); }
 .brand .latin { font: 800 22px/1 var(--display); letter-spacing: -0.01em; }
 .biz { color: var(--ink-2); font-size: 15px; }
+.tabs { display: flex; gap: 4px; padding: 3px; background: var(--stone); border: 1px solid var(--line); border-radius: 10px; }
+.tabs a { padding: 6px 12px; border-radius: 7px; font-size: 14px; font-weight: 700; color: var(--ink-2); text-decoration: none; }
+.tabs a[aria-current="page"] { background: var(--paper); color: var(--ink); box-shadow: 0 0 0 1px var(--line); }
+.tabs a:hover { color: var(--ink); }
 .biz strong { color: var(--ink); }
 .spacer { flex: 1; }
 .pill {
@@ -248,6 +252,7 @@ table { width: 100%; border-collapse: collapse; font-size: 14px; }
 td, th { text-align: left; padding: 6px 6px 6px 0; border-bottom: 1px solid var(--stone-2); vertical-align: top; }
 th { font-size: 13px; color: var(--ink-3); font-weight: 700; }
 td:first-child { white-space: nowrap; font-weight: 700; }
+.side table { overflow-wrap: break-word; }
 tr.flash td { animation: flash 1.6s ease-out; }
 @keyframes flash { from { background: var(--brass-soft); } to { background: transparent; } }
 .muted { color: var(--ink-3); font-size: 14px; }
@@ -261,6 +266,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
 <header>
   <div class="brand"><span class="deva" lang="hi">द्वारपाल</span><span class="latin">Dwarpal</span></div>
   <div class="biz">Every AI agent calling <strong id="bizName">…</strong> passes this gate</div>
+  <nav class="tabs" id="tabs" aria-label="Businesses"></nav>
   <div class="spacer"></div>
   <span class="pill" id="modePill"><span class="dot"></span><span id="modeText">connecting</span></span>
   <button class="btn quiet" id="resetBtn" type="button">Reset demo</button>
@@ -285,7 +291,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
         <div class="track" id="track">
           <div class="end" id="endCaller"><div class="disc" id="callerDisc">Agent</div><span>Caller</span></div>
           <!-- pillars injected -->
-          <div class="end biz-end" id="endBiz"><div class="disc">Clinic</div><span>Front desk</span></div>
+          <div class="end biz-end" id="endBiz"><div class="disc" id="bizDisc">Clinic</div><span id="bizDesk">Front desk</span></div>
           <div class="token hidden" id="token"></div>
         </div>
         <div class="msgs">
@@ -305,7 +311,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
 
   <aside class="side">
     <section class="panel">
-      <h2>Patient's phone</h2>
+      <h2 id="phoneTitle">Patient's phone</h2>
       <div class="phone-card" id="phoneCard"><div id="phone"><div class="muted">When a request needs the patient's own approval, it appears here.</div></div></div>
     </section>
     <section class="panel">
@@ -322,8 +328,8 @@ tr.flash td { animation: flash 1.6s ease-out; }
       </div>
     </section>
     <section class="panel">
-      <h2>Clinic appointments</h2>
-      <table><thead><tr><th>Id</th><th>Patient</th><th>Slot</th><th>Status</th></tr></thead><tbody id="apts"></tbody></table>
+      <h2 id="bookTitle">Records</h2>
+      <table><thead><tr id="bookHead"></tr></thead><tbody id="apts"></tbody></table>
       <p class="last-write" id="lastWrite"></p>
     </section>
   </aside>
@@ -355,7 +361,9 @@ const TIER = { open: "Open: anyone may ask", account: "Account: needs a verified
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const api = async (path, opts) => { const r = await fetch(path, opts); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.json(); };
+// Each business is mounted under its own prefix ("" for the clinic, "/payor" for the payor).
+const BASE = location.pathname.replace(/\/+$/, "");
+const api = async (path, opts) => { const r = await fetch(BASE + path, opts); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.json(); };
 
 // ---------- pillars ----------
 const track = $("track");
@@ -405,7 +413,7 @@ async function showDecision(d, animate) {
   $("gateEmpty").hidden = true; $("gateBody").hidden = false;
   current = d;
   const a = d.agent;
-  const asking = d.intent ? `asking to <b>${esc(d.intent.replaceAll("_", " "))}</b>` : "with free text";
+  const asking = d.intent ? `asking to <b>${esc(d.summary || d.intent.replaceAll("_", " "))}</b>` : "with free text";
   const who = a && a.verified ? `${esc(a.name)}<small>acting for ${esc(a.principal.name)}, ${asking}</small>`
     : a ? `${esc(a.name)}<small>no passport, ${asking}</small>`
     : `Unverified caller<small>${asking}</small>`;
@@ -437,6 +445,8 @@ async function showDecision(d, animate) {
   if (d.receipt) ex.push(`Signed receipt <span class="hash">${esc(d.receipt.slice(-22))}</span> <button class="btn quiet" type="button" data-relay="1">Check the relay</button> <button class="btn quiet" type="button" data-copy="${esc(d.receipt)}">Copy receipt</button>`);
   if (d.ticket_id) ex.push(`Ticket <b>${esc(d.ticket_id)}</b>`);
   if (d.agent_lane) ex.push(`Lane code <b>${esc(d.agent_lane.code)}</b> offered`);
+  const rail = d.data && d.data.rail;
+  if (rail) ex.push(rail === "human" ? "No electronic rail: a person answers" : `Answered via <b>${esc(d.data.rail_label || rail)}</b>`);
   if (d.continued_from_call) ex.push(`Continued from phone call ${esc(d.continued_from_call.call_id)}`);
   if (d.audit_seq) ex.push(`Audit record #${d.audit_seq}`);
   ex.push(`${d.latency_ms < 1 ? "Under 1" : d.latency_ms} ms through the gate`);
@@ -494,7 +504,7 @@ function renderRows() {
     const who = d.agent ? d.agent.name : "Unverified caller";  // anonymous callers carry their own label
     return `<button type="button" class="row ${d.request_id === selected ? "sel" : ""}" data-id="${esc(d.request_id)}">
       <span class="when">${t}</span>
-      <span class="what"><b>${esc(who)}</b> ${esc(d.intent ? d.intent.replaceAll("_", " ") : "free text")}</span>
+      <span class="what"><b>${esc(who)}</b> ${esc(d.summary || (d.intent ? d.intent.replaceAll("_", " ") : "free text"))}</span>
       <span class="dots" aria-hidden="true">${dots}</span>
       <span class="oc ${d.outcome}">${esc(OUTCOME[d.outcome] || d.outcome)}</span></button>`;
   }).join("");
@@ -548,16 +558,17 @@ $("tamperBtn").onclick = async () => { await api("/api/demo/tamper", { method: "
 
 const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 let lastApts = {};
-const fmtSlot = (iso) => { const d = new Date(iso + ":00"); return isNaN(d) ? iso : d.toLocaleDateString([], { day: "numeric", month: "short" }) + ", " + iso.slice(11, 16); };
+let emptyPhone = "When a request needs the customer's own approval, it appears here.";
 async function loadClinic() {
-  const { appointments, changes } = await api("/api/clinic");
-  const last = (changes || [])[changes.length - 1];
-  $("lastWrite").textContent = last ? `Last change: ${last.action.replaceAll("_", " ")} by ${last.actor} (${last.channel === "agent" ? "AI agent" : "staff"}), through the same service the front desk uses.` : "AI agents and staff both change bookings through the same service.";
-  $("apts").innerHTML = appointments.map((a) => {
-    const sig = a.slot + a.status + a.copay_refunded;
-    const changed = lastApts[a.id] && lastApts[a.id] !== sig;
-    lastApts[a.id] = sig;
-    return `<tr class="${changed ? "flash" : ""}"><td>${esc(a.id)}</td><td>${esc(a.patient)}</td><td>${esc(fmtSlot(a.slot))}</td><td>${esc(a.status)}${a.copay_refunded ? ", refunded" : ""}</td></tr>`;
+  const book = await api("/api/book");
+  $("bookTitle").textContent = book.title;
+  $("bookHead").innerHTML = book.columns.map((c) => `<th>${esc(c)}</th>`).join("");
+  $("lastWrite").textContent = book.last_change || "";
+  $("apts").innerHTML = book.rows.map((row) => {
+    const sig = row.join("|");
+    const changed = lastApts[row[0]] && lastApts[row[0]] !== sig;
+    lastApts[row[0]] = sig;
+    return `<tr class="${changed ? "flash" : ""}">${row.map((c) => `<td>${esc(c)}</td>`).join("")}</tr>`;
   }).join("");
 }
 
@@ -618,7 +629,7 @@ async function loadPhone() {
       <p class="note" id="note-${esc(c.id)}">Needs strength ${c.required_strength}. A voiceprint counts for 1 at most.</p>
     </div>`).join("");
   const hist = done.map((c) => `<div class="req done"><div class="from">${esc(label[c.status] || c.status)}${c.factors.length ? ` with ${esc(c.factors.map((f) => short[f] || f).join(" + "))}` : ""}</div><div class="ask">${esc(c.summary)}</div></div>`).join("");
-  $("phone").innerHTML = pend + hist || '<div class="muted">When a request needs the patient\'s own approval, it appears here.</div>';
+  $("phone").innerHTML = pend + hist || `<div class="muted">${esc(emptyPhone)}</div>`;
   if (pending.length) { const card = $("phoneCard"); card.classList.remove("ringing"); void card.offsetWidth; card.classList.add("ringing"); }
 }
 $("phone").addEventListener("click", async (e) => {
@@ -660,7 +671,7 @@ $("resetBtn").onclick = async () => {
 
 // ---------- live events ----------
 function connect() {
-  const es = new EventSource("/api/events");
+  const es = new EventSource(BASE + "/api/events");
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
     if (ev.type === "decision") {
@@ -678,6 +689,16 @@ function connect() {
 async function loadInfo() {
   const info = await api("/api/info");
   $("bizName").textContent = info.business.name;
+  document.title = `Dwarpal: ${info.business.name}`;
+  $("tabs").innerHTML = (info.businesses || []).map((b) =>
+    `<a href="${esc(b.href)}"${b.slug === info.business.slug ? ' aria-current="page"' : ""}>${esc(b.name)}</a>`).join("");
+  $("tabs").hidden = (info.businesses || []).length < 2;
+  $("liveBtn").hidden = !info.live;
+  const payor = info.business.slug === "payor";
+  $("bizDisc").textContent = payor ? "Payor" : "Clinic";
+  $("bizDesk").textContent = payor ? "Provider desk" : "Front desk";
+  $("phoneTitle").textContent = payor ? "Practice approvals" : "Patient's phone";
+  emptyPhone = payor ? "When a request needs the practice admin's approval, it appears here." : "When a request needs the patient's own approval, it appears here.";
   const gem = info.llm_mode === "gemini";
   $("modePill").classList.toggle("mock", !gem);
   $("modeText").textContent = gem ? `Gemini: ${info.model}` : "Offline scripted model";

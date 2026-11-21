@@ -99,6 +99,7 @@ class Policy:
     voice: VoicePolicy
     customer_messages: dict[str, str]
     data: DataPolicy
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)  # business-specific sections, e.g. rails
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Policy":
@@ -142,14 +143,19 @@ class Policy:
                 never_disclose_fields=[f.lower() for f in d.get("never_disclose_fields") or []],
                 redact_patterns={k: re.compile(v) for k, v in (d.get("redact_patterns") or {}).items()},
             ),
+            raw=raw,
         )
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Policy":
+    def load(cls, path: Path | str | None = None) -> "Policy":
+        """Load a policy file. A bare name ("brightline_payor.yaml") loads a built-in policy."""
         if path is None:
-            text = resources.files("dwarpal.policies").joinpath("sunrise_clinic.yaml").read_text(encoding="utf-8")
+            path = "sunrise_clinic.yaml"
+        p = Path(path)
+        if not p.exists() and p.parent == Path("."):
+            text = resources.files("dwarpal.policies").joinpath(p.name).read_text(encoding="utf-8")
         else:
-            text = Path(path).read_text(encoding="utf-8")
+            text = p.read_text(encoding="utf-8")
         return cls.from_dict(yaml.safe_load(text))
 
     def public_summary(self) -> list[dict[str, Any]]:

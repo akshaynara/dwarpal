@@ -28,6 +28,8 @@ The same tiers apply whether the request arrives over A2A or on a phone call. Be
 | **Data guard** | What must never leave? | Policy-defined fields dropped and PII patterns redacted from every outbound response |
 | **Audit** | What was asked, approved and said? | Hash-chained, gateway-signed log of every decision, approval and business write. Completed actions return a signed receipt |
 
+Two businesses ship as demos on one gateway, each with its own policy, agent card, voice endpoint, audit log and dashboard: **Sunrise Family Clinic** (patients' agents, at `/`) and **Brightline Health Plan**, a payor (providers' agents checking prior auths and eligibility, at `/payor`). The clinic from the first demo is the provider calling the payor in the second.
+
 Three more things set it apart:
 
 - **One policy across voice and A2A.** The business's voice platform (an IVR or a CX Agent Studio agent) calls the gateway on each turn. Carrier attestation and AI-voice detection scores are *signals*: they can add friction, never unlock an action, and never block a caller. A declared agent is offered a lane code to switch to A2A, carrying the call's context with it. See [Connecting a voice platform](docs/voice-integration.md).
@@ -42,9 +44,9 @@ git clone https://github.com/akshaynara/dwarpal && cd dwarpal
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
 
-pytest                  # 83 tests
-dwarpal demo            # seventeen scenarios in the terminal (add -v to see every check)
-dwarpal serve           # gateway + live dashboard on http://localhost:8080
+pytest                  # 98 tests
+dwarpal demo            # 25 scenarios across both businesses (add -v to see every check)
+dwarpal serve           # gateway + dashboards: http://localhost:8080 (clinic), /payor/ (payor)
 ```
 
 It runs fully offline by default. The business agent is a real ADK `LlmAgent` with tools, driven by a scripted model so the demo never depends on a network or an API key.
@@ -89,6 +91,21 @@ Open the dashboard and press **Ask Riya to approve, live**. Riya's assistant ask
 | Carrier signals | A fully attested number doesn't replace verification; a weakly attested one adds step-up for changes, not for reading |
 
 The dashboard also shows the human queue (with due times and join codes), the clinic's appointment book with who made the last change and through which channel, and an audit panel where **Tamper with a record** edits the log on disk and verification shows where the chain breaks.
+
+### Payor desk
+
+At `/payor/`, providers' agents ask Brightline Health Plan about prior authorisations and eligibility. Each plan answers on the rails it actually has, declared in the payor's policy: a FHIR PA API for Medicare Advantage, X12 278/270 for the commercial plan, and a person for a legacy employer plan with no electronic inquiry. See [The payor desk](docs/payor-desk.md).
+
+| Scenario | What happens |
+|---|---|
+| FHIR rail | Sunrise's RCM agent checks an MRI auth on a Medicare Advantage plan; answered over the FHIR PA API, diagnosis stripped |
+| X12 rail | The same question on a commercial plan, answered over X12 278, including what the payor still needs |
+| No rail | An employer plan with no electronic inquiry: the payor hands it to a representative with a due time; asking again changes nothing |
+| Published rules | Any agent can ask whether a procedure needs prior auth; a specific auth needs a provider credential |
+| Your own patients only | Another provider's credentialed agent can't see Sunrise's auth, and a wrong date of birth gets the same answer |
+| Eligibility | Coverage and copay over X12 270/271, SSN and address stripped |
+| Submissions | A new PA submission goes to a person with a 72-hour due time |
+| Provider voice bot | Sunrise's voice bot calls the payor's provider line, presses 1 and finishes over A2A with its credential |
 
 ## How a caller talks to Dwarpal
 
@@ -135,7 +152,7 @@ Everything the business decides lives in one policy file ([`sunrise_clinic.yaml`
 |---|---|---|
 | Gateway runtime | `dwarpal serve` | Cloud Run (Dockerfile included), behind Apigee for mTLS and quotas |
 | Business agent | In-process ADK `Runner` | Vertex AI Agent Engine or Cloud Run, reachable only from the gateway (`A2AUpstreamBackend`) |
-| Business service | In-memory clinic service | The business's existing scheduling and billing APIs |
+| Business service | In-memory clinic and payor services | The business's existing scheduling, billing, FHIR and X12 systems |
 | Customer step-up | Dashboard phone card | The identity provider's CIBA backchannel (app push, SMS, IVR PIN) |
 | Model | Scripted / Gemini API | Gemini on Vertex AI |
 | Injection defence | Rules + Gemini | Plus a Model Armor template |
@@ -144,9 +161,9 @@ Everything the business decides lives in one policy file ([`sunrise_clinic.yaml`
 
 ## Roadmap
 
-Shaped by feedback from people who run contact centres, healthcare operations and voice security. Done so far: action tiers, customer step-up, the shared business service, two messages per response, structured handoff, the phone lane with signals, the lane switch, and the accessibility path. Next:
+Shaped by feedback from people who run contact centres, healthcare operations and voice security. Done so far: action tiers, customer step-up, the shared business service, two messages per response, structured handoff, the phone lane with signals, the lane switch, the accessibility path, and the payor desk with rails per plan. Next:
 
-- **Payor desk.** Prior-authorisation status and eligibility for providers' agents calling payors, with each payor's rails (FHIR PA API, X12 278, or voice and human fallback) declared in its policy file
+- **Real rails.** Swap the simulated FHIR and X12 connectors for a payor sandbox or clearinghouse
 - **Standards.** Publish the passport as an A2A extension, move request signing to HTTP Message Signatures (RFC 9421), and accept Personal Agent Protocol credentials once its spec ships
 - **Measurement.** Share of traffic from agents, lane split, blocked data-exfiltration attempts, voice minutes moved to the fast lane, repeat calls avoided
 
@@ -161,7 +178,8 @@ Shaped by feedback from people who run contact centres, healthcare operations an
 | `DWARPAL_PUBLIC_URL` | `http://localhost:8080` | URL advertised in the agent card |
 | `DWARPAL_DEMO` | `true` | Set `false` in production to disable scenario, live, desk, tamper and reset endpoints |
 | `DWARPAL_MODEL_ARMOR_TEMPLATE` | unset | Enables the Model Armor layer |
-| `DWARPAL_CHANNEL_KEY` | generated | Shared secret for your voice platform; otherwise generated in `.dwarpal/channel.key` |
+| `DWARPAL_CHANNEL_KEY` | generated | Shared secret for your voice platform; otherwise generated per business in its data folder |
+| `DWARPAL_BUSINESSES` | `clinic,payor` | Which demo businesses to mount |
 
 ## License
 

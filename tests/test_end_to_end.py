@@ -3,7 +3,7 @@
 import httpx
 import pytest
 
-from dwarpal.app import create_app
+from dwarpal.app import create_app, stage_for
 from dwarpal.config import Settings
 from dwarpal.demo import scenarios as sc
 from dwarpal.messages import message_hash
@@ -13,7 +13,7 @@ BASE = "http://dwarpal.test"
 
 @pytest.fixture
 def app(tmp_path):
-    return create_app(Settings(llm_mode="mock", data_dir=tmp_path, public_url=BASE))
+    return create_app(Settings(llm_mode="mock", data_dir=tmp_path, public_url=BASE), businesses=["clinic"])
 
 
 def client(app):
@@ -23,9 +23,7 @@ def client(app):
 async def run(app, scenario_id):
     rt = app.state.runtime
     async with client(app) as http:
-        stage = sc.Stage(callers=rt.world.callers(http, BASE), approve=rt.approve, join=rt.join,
-                         ivr=sc.IVR(http, rt.channel_key, rt.service))
-        return await sc.run_scenario(scenario_id, stage)
+        return await sc.run_scenario(scenario_id, stage_for(rt, http))
 
 
 @pytest.mark.parametrize("scenario_id", list(sc.BY_ID))

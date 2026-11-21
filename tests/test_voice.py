@@ -5,7 +5,7 @@ import json
 import httpx
 import pytest
 
-from dwarpal.app import create_app
+from dwarpal.app import create_app, stage_for
 from dwarpal.config import Settings
 from dwarpal.demo import scenarios as sc
 from dwarpal.policy import Policy
@@ -17,7 +17,7 @@ RIYA = {"principal_id": "P-1001", "name": "Riya Sharma", "method": "patient_id+d
 
 @pytest.fixture
 def app(tmp_path):
-    return create_app(Settings(llm_mode="mock", data_dir=tmp_path, public_url=BASE))
+    return create_app(Settings(llm_mode="mock", data_dir=tmp_path, public_url=BASE), businesses=["clinic"])
 
 
 def client(app):
@@ -34,9 +34,7 @@ async def turn(http, app, **body):
 async def run(app, scenario_id):
     rt = app.state.runtime
     async with client(app) as http:
-        stage = sc.Stage(callers=rt.world.callers(http, BASE), approve=rt.approve, join=rt.join,
-                         ivr=sc.IVR(http, rt.channel_key, rt.service))
-        return await sc.run_scenario(scenario_id, stage)
+        return await sc.run_scenario(scenario_id, stage_for(rt, http))
 
 
 async def test_voice_endpoint_needs_the_channel_key(app):
