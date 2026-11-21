@@ -24,7 +24,7 @@ class Settings:
     """
 
     llm_mode: str = field(default_factory=lambda: os.getenv("DWARPAL_LLM_MODE", "auto"))
-    model: str = field(default_factory=lambda: os.getenv("DWARPAL_MODEL", "gemini-2.5-flash"))
+    model: str = field(default_factory=lambda: os.getenv("DWARPAL_MODEL", "gemini-flash-latest"))
     data_dir: Path = field(default_factory=lambda: Path(os.getenv("DWARPAL_DATA_DIR", ".dwarpal")))
     policy_path: Path | None = field(
         default_factory=lambda: Path(p) if (p := os.getenv("DWARPAL_POLICY")) else None

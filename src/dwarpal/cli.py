@@ -153,12 +153,19 @@ async def _doctor(live: bool) -> int:
             hint = {503: f"Google says {s.model} is overloaded right now. Retry in a few minutes, or try another "
                          "model, e.g. DWARPAL_MODEL=gemini-2.5-flash-lite.",
                     429: "quota or rate limit reached for this key. Wait a minute, or check limits in AI Studio.",
-                    404: f"no model called {s.model} for this key. Run the models list and pick one.",
+                    404: f"{s.model} isn't available to this key (Google retires models for new keys).",
                     400: "Google rejected the request; often an invalid key.",
                     403: "this key isn't allowed to call Gemini (API disabled or key restricted)."}.get(exc.code, "")
-            add("FAIL", "Gemini call", f"HTTP {exc.code} {exc.status or ''}: {hint or str(exc.message)[:160]} "
-                "The demo still works: the scripted fallback answers.")
+            add("FAIL", "Gemini call", f"HTTP {exc.code} {exc.status or ''}: Google says \"{str(exc.message)[:160]}\" "
+                f"{hint} The demo still works: the scripted fallback answers.")
             live_gemini_failed = True
+            if exc.code in (404, 503):
+                working = await _find_working_model(client, s.model)
+                if working:
+                    add("WARN", "Gemini model", f"{working} answers for this key. Use it: "
+                        f"export DWARPAL_MODEL={working}")
+                else:
+                    add("WARN", "Gemini model", "no other Flash model answered either; try again in a few minutes.")
         except Exception as exc:  # noqa: BLE001
             add("FAIL", "Gemini call", f"{type(exc).__name__}: {str(exc)[:160]}")
             live_gemini_failed = True
@@ -186,6 +193,28 @@ async def _doctor(live: bool) -> int:
         except Exception as exc:  # noqa: BLE001
             add("FAIL", "Payor FHIR endpoint", f"{url}: {type(exc).__name__}")
     return _report(results)
+
+
+async def _find_working_model(client, failed: str) -> str | None:
+    """Ask Google which Flash models this key can use, and return the first that actually answers."""
+    skip = ("image", "tts", "audio", "live", "embedding", "thinking", "exp", "preview", "8b")
+    try:
+        names = [m.name.removeprefix("models/") async for m in await client.aio.models.list()
+                 if "generateContent" in (m.supported_actions or []) and "flash" in (m.name or "")]
+    except Exception:  # noqa: BLE001
+        return None
+    candidates = [n for n in names if n != failed and not any(k in n for k in skip)]
+    candidates.sort(reverse=True)                                     # newest version numbers first,
+    candidates.sort(key=lambda n: ("latest" in n, "lite" in n))       # full Flash before Lite and aliases
+    candidates = candidates[:5]
+    print(f"  ...   trying other models: {', '.join(candidates) or 'none listed'}", flush=True)
+    for name in candidates:
+        try:
+            await asyncio.wait_for(client.aio.models.generate_content(model=name, contents="Reply with OK."), 10)
+            return name
+        except Exception:  # noqa: BLE001
+            continue
+    return None
 
 
 def _line(status: str, name: str, detail: str) -> None:
