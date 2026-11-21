@@ -58,12 +58,12 @@ dwarpal demo            # every scenario in the terminal (add -v to see every ch
 dwarpal serve           # http://localhost:8080 (clinic) and http://localhost:8080/payor/ (payor)
 ```
 
-It runs fully offline by default: the business agents are real ADK `LlmAgent`s with tools, driven by a scripted model. For Gemini:
+Settings can also live in a `.env` file in the folder you run `dwarpal` from (copy `.env.example`); it is git-ignored. It runs fully offline by default: the business agents are real ADK `LlmAgent`s with tools, driven by a scripted model. For Gemini:
 
 ```bash
 export GOOGLE_API_KEY=...                 # or GOOGLE_GENAI_USE_VERTEXAI=true + GOOGLE_CLOUD_PROJECT
 export DWARPAL_MODEL=gemini-flash-latest
-dwarpal doctor                            # confirms a real Gemini round trip
+dwarpal doctor                            # confirms a real Gemini round trip, or names a model that works
 dwarpal serve
 ```
 

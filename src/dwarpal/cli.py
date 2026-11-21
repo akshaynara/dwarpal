@@ -289,6 +289,10 @@ def cmd_verify(args: argparse.Namespace) -> None:
 
 
 def main() -> None:
+    # Settings from a .env file in the current folder; variables already exported take precedence.
+    from dotenv import load_dotenv
+
+    load_dotenv(".env", override=False)
     logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
     p = argparse.ArgumentParser(prog="dwarpal", description="Trust and security gateway for inbound AI agents.")
     sub = p.add_subparsers(dest="cmd", required=True)
