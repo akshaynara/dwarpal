@@ -32,6 +32,10 @@ class CallResult:
     def data(self) -> dict[str, Any]:
         return self.payload.get("data") or {}
 
+    @property
+    def challenge_id(self) -> str | None:
+        return (self.payload.get("step_up") or {}).get("challenge_id")
+
 
 class CallerAgent:
     def __init__(self, *, name: str, key: KeyPair, passport: str | None, audience: str,
@@ -50,7 +54,8 @@ class CallerAgent:
         return self._client
 
     def prepare(self, *, intent: str | None = None, params: dict[str, Any] | None = None, note: str | None = None,
-                text: str = "", session: str | None = None, tag: str | None = None, sign: bool = True) -> Message:
+                text: str = "", session: str | None = None, tag: str | None = None, sign: bool = True,
+                step_up: str | None = None) -> Message:
         envelope = None
         if intent:
             envelope = {"intent": intent, "params": params or {}}
@@ -65,9 +70,12 @@ class CallerAgent:
         meta: dict[str, Any] = {}
         if self.passport:
             meta["dwarpal_passport"] = self.passport
-        if sign:
-            meta["dwarpal_proof"] = sign_request(self.key, audience=self.audience,
-                                                 body={"envelope": envelope, "text": text})
+        signed: dict[str, Any] = {"envelope": envelope, "text": text}
+        if step_up:
+            meta["dwarpal_step_up"] = step_up
+            signed["step_up"] = step_up  # the approval id is covered by the signature too
+        if sign and self.passport:
+            meta["dwarpal_proof"] = sign_request(self.key, audience=self.audience, body=signed)
         if tag:
             meta["dwarpal_tag"] = tag
         msg.metadata.update(meta)

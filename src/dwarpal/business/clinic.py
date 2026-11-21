@@ -1,163 +1,83 @@
-"""The business side of the demo: Sunrise Family Clinic's front-desk agent, built with Google ADK.
+"""Sunrise Family Clinic's AI front-desk agent, built with Google ADK.
 
-The agent has ordinary receptionist tools, including one that reads medical records for staff.
-Dwarpal's job is to make sure an *inbound AI agent* can only ever reach the safe ones, for the
-right patient, and never sees what it shouldn't.
-
-Ownership (which patient the caller acts for) comes from ADK session state set by the gateway
-from the verified passport, never from anything the caller typed.
+Its tools are thin wrappers over ClinicService, the same service the human front desk uses. The
+patient the caller acts for comes from ADK session state, set by the gateway from the verified
+passport, never from anything the caller typed.
 """
 
 from __future__ import annotations
 
-import copy
 import json
 import re
-from typing import Any, AsyncGenerator
+from typing import AsyncGenerator
 
 from google.adk.agents import LlmAgent
 from google.adk.models import BaseLlm, LlmRequest, LlmResponse
 from google.adk.tools import ToolContext
 from google.genai import types
 
-SEED: dict[str, Any] = {
-    "patients": {
-        "P-1001": {"name": "Riya Sharma", "phone": "+91 98100 12345", "dob": "1991-04-18",
-                   "diagnosis": "Type 2 diabetes", "prescription": "Metformin 500mg BD",
-                   "lab_results": "HbA1c 7.1% (Oct 2026)", "insurance_id": "HW-88231"},
-        "P-2002": {"name": "Vikram Rao", "phone": "+91 99000 54321", "dob": "1984-09-02",
-                   "diagnosis": "Hypertension", "prescription": "Amlodipine 5mg OD",
-                   "lab_results": "BP 138/88", "insurance_id": "HW-11902"},
-    },
-    "appointments": {
-        "APT-501": {"patient_id": "P-1001", "doctor": "Dr. Mehta", "slot": "2026-11-12T10:00",
-                    "status": "booked", "copay_inr": 800, "copay_refunded": False},
-        "APT-488": {"patient_id": "P-1001", "doctor": "Dr. Mehta", "slot": "2026-11-05T11:30",
-                    "status": "cancelled", "copay_inr": 800, "copay_refunded": False},
-        "APT-777": {"patient_id": "P-2002", "doctor": "Dr. Rao", "slot": "2026-11-13T15:00",
-                    "status": "booked", "copay_inr": 600, "copay_refunded": False},
-    },
-    "open_slots": {
-        "Dr. Mehta": ["2026-11-13T09:30", "2026-11-13T11:00", "2026-11-14T10:00", "2026-11-14T12:30"],
-        "Dr. Rao": ["2026-11-14T09:00", "2026-11-15T14:00"],
-    },
-}
+from .service import Actor, ClinicService
 
 
-class ClinicDB:
-    def __init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        self.data = copy.deepcopy(SEED)
-
-    def appointments_view(self) -> list[dict[str, Any]]:
-        out = []
-        for apt_id, a in self.data["appointments"].items():
-            out.append({"id": apt_id, "patient": self.data["patients"][a["patient_id"]]["name"], **a})
-        return out
+def _actor(tool_context: ToolContext) -> Actor:
+    st = tool_context.state
+    return Actor(channel="agent", id=st.get("caller_agent_id") or "anonymous",
+                 principal_id=st.get("principal_id") or None)
 
 
-def build_tools(db: ClinicDB) -> list:
-    def _owned(appointment_id: str, tool_context: ToolContext) -> tuple[dict | None, dict | None]:
-        apt = db.data["appointments"].get(appointment_id)
-        principal = tool_context.state.get("principal_id")
-        # Same answer for "doesn't exist" and "not yours": don't leak which appointments exist.
-        if not apt or apt["patient_id"] != principal:
-            return None, {"status": "not_found", "message": f"No appointment {appointment_id} found for this patient."}
-        return apt, None
+def build_tools(service: ClinicService) -> list:
+    def clinic_info(topic: str, tool_context: ToolContext) -> dict:
+        """Clinic hours, address or accepted insurers. topic: hours | address | insurers."""
+        return service.clinic_info(_actor(tool_context), topic)
+
+    def list_open_slots(doctor: str, date: str, tool_context: ToolContext) -> dict:
+        """List open appointment slots for a doctor on a date (YYYY-MM-DD)."""
+        return service.list_open_slots(_actor(tool_context), doctor, date)
 
     def get_appointment(appointment_id: str, tool_context: ToolContext) -> dict:
         """Look up one appointment for the patient the caller acts for."""
-        apt, err = _owned(appointment_id, tool_context)
-        if err:
-            return err
-        return {"status": "ok", "appointment_id": appointment_id, "doctor": apt["doctor"], "slot": apt["slot"],
-                "state": apt["status"],
-                "message": f"{appointment_id} with {apt['doctor']} on {apt['slot'].replace('T', ' at ')} "
-                           f"is {apt['status']}."}
-
-    def list_open_slots(doctor: str, date: str) -> dict:
-        """List open appointment slots for a doctor on a date (YYYY-MM-DD)."""
-        slots = [s for s in db.data["open_slots"].get(doctor, []) if s.startswith(date)]
-        times = ", ".join(s[11:] for s in slots) or "none"
-        return {"status": "ok", "doctor": doctor, "date": date, "slots": slots,
-                "message": f"{doctor} has {len(slots)} open slot(s) on {date}: {times}."}
+        return service.get_appointment(_actor(tool_context), appointment_id)
 
     def reschedule_appointment(appointment_id: str, new_slot: str, tool_context: ToolContext) -> dict:
         """Move an appointment to an open slot (YYYY-MM-DDTHH:MM)."""
-        apt, err = _owned(appointment_id, tool_context)
-        if err:
-            return err
-        if apt["status"] != "booked":
-            return {"status": "rejected", "message": f"{appointment_id} is {apt['status']} and cannot be moved."}
-        free = db.data["open_slots"].get(apt["doctor"], [])
-        if new_slot not in free:
-            return {"status": "rejected", "message": f"{new_slot} is not an open slot for {apt['doctor']}.",
-                    "open_slots": free}
-        free.remove(new_slot)
-        free.append(apt["slot"])
-        free.sort()
-        old, apt["slot"] = apt["slot"], new_slot
-        return {"status": "done", "appointment_id": appointment_id, "doctor": apt["doctor"],
-                "old_slot": old, "new_slot": new_slot,
-                "message": f"Moved {appointment_id} with {apt['doctor']} to {new_slot.replace('T', ' at ')}."}
+        return service.reschedule(_actor(tool_context), appointment_id, new_slot)
 
     def cancel_appointment(appointment_id: str, reason: str, tool_context: ToolContext) -> dict:
         """Cancel an appointment."""
-        apt, err = _owned(appointment_id, tool_context)
-        if err:
-            return err
-        if apt["status"] != "booked":
-            return {"status": "rejected", "message": f"{appointment_id} is already {apt['status']}."}
-        apt["status"] = "cancelled"
-        db.data["open_slots"].setdefault(apt["doctor"], []).append(apt["slot"])
-        return {"status": "done", "appointment_id": appointment_id,
-                "message": f"Cancelled {appointment_id} ({reason or 'no reason given'})."}
+        return service.cancel(_actor(tool_context), appointment_id, reason)
 
     def refund_copay(appointment_id: str, amount_inr: float, tool_context: ToolContext) -> dict:
         """Refund the co-pay for a cancelled appointment."""
-        apt, err = _owned(appointment_id, tool_context)
-        if err:
-            return err
-        if apt["status"] != "cancelled":
-            return {"status": "rejected", "message": "Co-pay refunds are only for cancelled appointments."}
-        if apt["copay_refunded"]:
-            return {"status": "rejected", "message": "This co-pay was already refunded."}
-        if float(amount_inr) > apt["copay_inr"]:
-            return {"status": "rejected", "message": f"Refund exceeds the ₹{apt['copay_inr']} co-pay paid."}
-        apt["copay_refunded"] = True
-        return {"status": "done", "appointment_id": appointment_id, "refunded_inr": float(amount_inr),
-                "message": f"Refunded ₹{float(amount_inr):.0f} co-pay for {appointment_id}."}
+        return service.refund_copay(_actor(tool_context), appointment_id, amount_inr)
 
     def get_patient_record(record_type: str, tool_context: ToolContext) -> dict:
-        """STAFF ONLY: read the patient's clinical record (diagnosis, prescription, lab results)."""
-        p = db.data["patients"].get(tool_context.state.get("principal_id"), {})
-        return {"status": "ok", "record_type": record_type, "diagnosis": p.get("diagnosis"),
-                "prescription": p.get("prescription"), "lab_results": p.get("lab_results"),
-                "message": "Clinical record retrieved."}
+        """STAFF ONLY: read the patient's clinical record. The service refuses AI callers."""
+        actor = _actor(tool_context)
+        return service.get_clinical_record(actor, actor.principal_id or "")
 
-    return [get_appointment, list_open_slots, reschedule_appointment, cancel_appointment, refund_copay,
-            get_patient_record]
+    return [clinic_info, list_open_slots, get_appointment, reschedule_appointment, cancel_appointment,
+            refund_copay, get_patient_record]
 
 
 INTENT_TO_TOOL = {
-    "appointment_status": "get_appointment",
+    "clinic_info": "clinic_info",
     "list_slots": "list_open_slots",
+    "appointment_status": "get_appointment",
     "reschedule_appointment": "reschedule_appointment",
     "cancel_appointment": "cancel_appointment",
     "refund_copay": "refund_copay",
 }
 
 INSTRUCTION = """You are the front-desk agent for Sunrise Family Clinic.
-Requests reach you through the Dwarpal gateway as a VERIFIED TASK: the caller is another AI agent acting
-for the named patient, and the gateway has already checked its identity, permissions and the request.
+Requests reach you through the Dwarpal gateway as a VERIFIED TASK: the gateway has already checked who
+is calling, what they may do and, for binding actions, the patient's own approval.
 
 Rules:
 - Do exactly the task's intent with its parameters, using your tools. Do not do anything else.
+- Open-tier tasks may come from anonymous callers: answer them without any patient data.
 - Never use get_patient_record for agent callers. Clinical information is never shared with agents.
 - If a tool says something is not found or rejected, report that plainly. Do not guess or invent.
-- Reply in one or two short, factual sentences that the caller agent can relay to the patient."""
+- Reply in one or two short, factual sentences."""
 
 
 class ScriptedClinicModel(BaseLlm):
@@ -185,15 +105,19 @@ class ScriptedClinicModel(BaseLlm):
             yield LlmResponse(content=types.Content(role="model", parts=[
                 types.Part(text="I can't help with that request here.")]))
             return
+        if tool == "clinic_info":
+            params.setdefault("topic", "hours")
+        if tool == "cancel_appointment":
+            params.setdefault("reason", "")
         yield LlmResponse(content=types.Content(role="model", parts=[
             types.Part(function_call=types.FunctionCall(name=tool, args=params))]))
 
 
-def build_clinic_agent(db: ClinicDB, *, use_gemini: bool, model: str) -> LlmAgent:
+def build_clinic_agent(service: ClinicService, *, use_gemini: bool, model: str) -> LlmAgent:
     return LlmAgent(
         name="sunrise_front_desk",
         description="Front-desk agent for Sunrise Family Clinic (appointments and co-pays).",
         model=model if use_gemini else ScriptedClinicModel(model="scripted-clinic"),
         instruction=INSTRUCTION,
-        tools=build_tools(db),
+        tools=build_tools(service),
     )

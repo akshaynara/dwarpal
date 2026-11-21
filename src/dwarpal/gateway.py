@@ -1,10 +1,18 @@
-"""The Dwarpal pipeline. Every inbound agent request goes through the same ordered checks:
+"""The Dwarpal pipeline. Gate the action, not the caller.
 
-    identity → escalation limits → protocol → security → delegation → handoff rules
-             → business agent → data guard → audit + receipt
+Every inbound request is checked against what its *action* requires (policy tier), not against a
+guess about who is calling:
 
-Each check records a pass / fail / warn / handoff / skip with a human-readable reason, which is
-what the caller gets back, what the audit log stores and what the dashboard shows.
+    identity → limits → protocol → security → delegation → human-only? → step-up
+             → business agent → data guard → messages → audit + receipt
+
+  open     anyone may ask, anonymous callers included; no patient data comes back
+  account  needs a verified passport with the right scope
+  binding  also needs the patient's own approval (step-up) for this exact action
+  human    always goes to a person
+
+Each check records pass / fail / warn / handoff / skip with a plain reason. The caller gets those
+back, the audit log stores them, and the dashboard shows them.
 """
 
 from __future__ import annotations
@@ -22,22 +30,26 @@ from .data_guard import filter_outbound
 from .escalation import EscalationQueue
 from .events import EventBus
 from .guard import SessionGuard, SessionState
-from .identity import IdentityError, IdentityVerifier, VerifiedAgent, body_hash
+from .identity import IdentityError, IdentityVerifier, body_hash
+from .messages import action_summary, agent_outcome, customer_message, enrich, message_hash
 from .policy import Policy
 from .shield import Shield
+from .stepup import Challenge, StepUpService
 
 log = logging.getLogger("dwarpal.gateway")
 
-CHECKS = ["identity", "protocol", "security", "delegation", "escalation", "data_guard", "audit"]
+CHECKS = ["identity", "protocol", "security", "delegation", "step_up", "escalation", "data_guard", "audit"]
 LABELS = {
     "identity": "Identity",
     "protocol": "Protocol",
     "security": "Security",
     "delegation": "Delegation",
+    "step_up": "Step-up",
     "escalation": "Escalation",
     "data_guard": "Data guard",
     "audit": "Audit",
 }
+STEP_UP_POLL_SECONDS = 15
 
 
 @dataclass
@@ -58,27 +70,53 @@ class InboundRequest:
     text: str = ""
     passport: str | None = None
     proof: str | None = None
+    step_up: str | None = None  # challenge id, when resending after the customer approved
     tag: str | None = None  # e.g. demo scenario name
 
     @property
     def signed_body(self) -> dict[str, Any]:
         """Exactly what the caller's request proof must cover."""
-        return {"envelope": self.body, "text": self.text}
+        d: dict[str, Any] = {"envelope": self.body, "text": self.text}
+        if self.step_up:
+            d["step_up"] = self.step_up
+        return d
+
+
+@dataclass
+class Caller:
+    agent_id: str
+    name: str
+    principal_id: str
+    principal_name: str
+    verified: bool
+    info: dict[str, Any]
+
+    @classmethod
+    def anonymous(cls) -> "Caller":
+        return cls("anonymous", "Anonymous caller", "", "", False,
+                   {"id": "anonymous", "name": "Anonymous caller", "issuer": None, "principal": None,
+                    "scopes": [], "limits": {}, "verified": False})
 
 
 @dataclass
 class Decision:
     request_id: str
     session_id: str
-    outcome: str  # completed | rejected | denied | escalated | needs_structure | error
+    # completed | rejected | denied | escalated | step_up_required | needs_structure | error
+    outcome: str
     checks: list[Check]
-    reply: str
+    reply: str  # for the calling agent
+    customer_message: str = ""  # for the customer, written by the business
+    agent_outcome: dict[str, Any] = field(default_factory=dict)
+    tier: str | None = None
     agent: dict[str, Any] | None = None
     intent: str | None = None
     params: dict[str, Any] = field(default_factory=dict)
     data: dict[str, Any] = field(default_factory=dict)
     receipt: str | None = None
     ticket_id: str | None = None
+    join_code: str | None = None
+    step_up: dict[str, Any] | None = None
     audit_seq: int | None = None
     latency_ms: int = 0
     tag: str | None = None
@@ -93,6 +131,10 @@ class Decision:
         return d
 
 
+def _when(ts: float) -> str:
+    return time.strftime("%a %d %b, %H:%M", time.localtime(ts)).replace(" 0", " ")
+
+
 class Gateway:
     def __init__(
         self,
@@ -102,6 +144,7 @@ class Gateway:
         shield: Shield,
         guard: SessionGuard,
         escalations: EscalationQueue,
+        stepup: StepUpService,
         audit: AuditLog,
         backend: BusinessBackend,
         events: EventBus | None = None,
@@ -111,6 +154,7 @@ class Gateway:
         self.shield = shield
         self.guard = guard
         self.escalations = escalations
+        self.stepup = stepup
         self.audit = audit
         self.backend = backend
         self.events = events or EventBus()
@@ -126,74 +170,130 @@ class Gateway:
             log.exception("gateway error")
             decision = Decision(request_id=self._rid(), session_id=req.session_id, outcome="error",
                                 checks=[Check("identity", "skip", "Internal error before checks completed.")],
-                                reply="The gateway hit an internal error. Nothing was done.")
+                                reply="The gateway hit an internal error. Nothing was done.",
+                                customer_message=customer_message(self.policy, "denied", intent=None, reason=None,
+                                                                  fields={}),
+                                agent_outcome=agent_outcome("error", ["internal_error"], retry_after_seconds=60))
             decision.data = {"error": type(exc).__name__}
         decision.tag = req.tag
         decision.latency_ms = int((time.perf_counter() - t0) * 1000)
         self._finalise(req, decision)
         return decision
 
-    def catalog(self) -> list[dict[str, Any]]:
-        return [i for i in self.policy.public_summary() if i["mode"] == "a2a"]
+    def catalog(self, include_human: bool = True) -> list[dict[str, Any]]:
+        return [i for i in self.policy.public_summary() if include_human or i["tier"] != "human"]
 
     # ------------------------------------------------------------------ pipeline
 
     async def _pipeline(self, req: InboundRequest) -> Decision:
         rid = self._rid()
         checks: list[Check] = []
+        body = req.body if isinstance(req.body, dict) else None
+        intent = str(body["intent"]) if body and body.get("intent") else None
+        params: dict[str, Any] = dict(body.get("params") or {}) if body else {}
+        note = str(body.get("note") or "") if body else ""
+        rule = self.policy.intents.get(intent) if intent else None
+        caller = Caller.anonymous()
 
-        def done(outcome: str, reply: str, **kw: Any) -> Decision:
+        def done(outcome: str, reply: str, *, reason: str | None = None, codes: list[str] | None = None,
+                 next_steps: list[str] | None = None, retry_after: float | None = None,
+                 expected_by: float | None = None, fields: dict[str, Any] | None = None,
+                 cm: str | None = None, **kw: Any) -> Decision:
             names = {c.name for c in checks}
             for n in CHECKS[:-1]:
                 if n not in names:
                     checks.append(Check(n, "skip", "Not reached."))
             checks.sort(key=lambda c: CHECKS.index(c.name))
+            if cm is None:
+                f = {**enrich(params), "action_summary": action_summary(rule, params), **(fields or {})}
+                cm = customer_message(self.policy, outcome, intent=intent, reason=reason, fields=f)
+                cm, _ = filter_outbound(cm, self.policy.data)
+            ao = agent_outcome(outcome, codes or ([reason] if reason else []), next_steps=next_steps,
+                               retry_after_seconds=None if retry_after is None else int(retry_after),
+                               expected_by=expected_by)
+            kw.setdefault("agent", caller.info)
             return Decision(request_id=rid, session_id=req.session_id, outcome=outcome, checks=checks, reply=reply,
-                            **kw)
+                            customer_message=cm, agent_outcome=ao, tier=rule.tier if rule else None,
+                            intent=intent, params=params, **kw)
 
-        # 1. Identity -------------------------------------------------------------------------
-        try:
-            agent = self.verifier.verify_passport(req.passport)
-            self.verifier.verify_proof(agent, req.proof, req.signed_body)
-        except IdentityError as e:
-            checks.append(Check("identity", "fail", f"{e.message} [{e.code}]"))
-            attempted = req.body.get("intent") if isinstance(req.body, dict) else None
-            return done("denied", f"Identity check failed: {e.message} This attempt has been logged.",
-                        intent=str(attempted) if attempted else None, data={"error": e.code})
-        checks.append(Check(
-            "identity", "pass",
-            f"AI agent “{agent.agent_name}” acting for {agent.principal.name} ({agent.principal.id}), "
-            f"passport from {agent.issuer}; request signed by the bound key, nonce fresh."))
-        agent_info = {"id": agent.agent_id, "name": agent.agent_name, "issuer": agent.issuer,
-                      "principal": asdict(agent.principal), "scopes": agent.scopes, "limits": agent.limits}
-        s = self.guard.session(req.session_id, agent.agent_id, agent.principal.id)
-        body = req.body if isinstance(req.body, dict) else None
-        intent = body.get("intent") if body else None
-        params = dict(body.get("params") or {}) if body else {}
-        note = str(body.get("note") or "") if body else ""
+        # 1. Identity: required unless the action is open-tier -----------------------------
+        if req.passport:
+            try:
+                agent = self.verifier.verify_passport(req.passport)
+                self.verifier.verify_proof(agent, req.proof, req.signed_body)
+            except IdentityError as e:
+                checks.append(Check("identity", "fail", f"{e.message} [{e.code}]"))
+                return done("denied", f"Identity check failed: {e.message} This attempt has been logged.",
+                            reason="identity", codes=["identity_failed", e.code], agent=None,
+                            data={"error": e.code})
+            caller = Caller(agent.agent_id, agent.agent_name, agent.principal.id, agent.principal.name, True,
+                            {"id": agent.agent_id, "name": agent.agent_name, "issuer": agent.issuer,
+                             "principal": asdict(agent.principal), "scopes": agent.scopes, "limits": agent.limits,
+                             "verified": True})
+            checks.append(Check(
+                "identity", "pass",
+                f"AI agent “{agent.agent_name}” acting for {agent.principal.name} ({agent.principal.id}), "
+                f"passport from {agent.issuer}; request signed by the bound key, nonce fresh."))
+        elif rule is None or rule.tier == "open":
+            checks.append(Check("identity", "warn",
+                                "No passport. Anonymous callers get open-tier actions only, with no patient data."))
+        else:
+            checks.append(Check("identity", "fail",
+                                f"No agent passport. “{intent}” is {rule.tier}-tier and needs a verified "
+                                "delegation. [missing_passport]"))
+            return done("denied", f"“{intent}” needs a verified agent passport. Open-tier actions don't.",
+                        reason="missing_passport", codes=["identity_failed", "missing_passport"],
+                        next_steps=["Present a passport from an issuer this business trusts",
+                                    "Or use an open-tier action from the catalog"],
+                        data={"error": "missing_passport", "intents": self._open_catalog()})
 
-        # 2. Escalation limits (session already with a person, rate, turns, cost, loops, probing) --
+        s = self.guard.session(req.session_id, caller.agent_id, caller.principal_id)
+
+        # 2. Limits: session already with a person, rate, turns, cost, loops, probing --------
         if s.locked_reason:
+            t = self.escalations.tickets.get(s.ticket_id or "")
             checks.append(Check("escalation", "handoff",
                                 f"Session already handed to a person ({s.ticket_id}): {s.locked_reason}"))
-            return done("escalated", f"This conversation is now with a person at {self.policy.business_name} "
-                                     f"(ticket {s.ticket_id}). Further automated requests are paused.",
-                        agent=agent_info, intent=intent, params=params, ticket_id=s.ticket_id)
-        rate = self.guard.check_rate(agent.agent_id)
+            return done("escalated", f"This conversation is with a person at {self.policy.business_name} "
+                                     f"(ticket {s.ticket_id}). Automated requests are paused.",
+                        reason="repeat", codes=["session_with_human"], ticket_id=s.ticket_id,
+                        **self._ticket_kw(t, repeat=True))
+        anon_limit = None if caller.verified else self.policy.limits.max_anonymous_requests_per_minute
+        rate = self.guard.check_rate(caller.agent_id, limit=anon_limit)
         if rate:
             checks.append(Check("escalation", "fail", rate.reason))
-            return done("denied", "Too many requests. Slow down and retry later.", agent=agent_info,
-                        intent=intent, params=params, data={"error": rate.code})
+            return done("denied", "Too many requests. Slow down and retry later.", reason="rate_limited",
+                        retry_after=60, data={"error": rate.code})
+        # Waiting on the customer isn't looping. A resend whose approval is still pending (and covers
+        # exactly this action) is answered here without counting toward turn or loop limits. It is
+        # still rate-limited, and it can never reach the business agent.
+        if req.step_up and rule is not None and rule.tier == "binding" and caller.verified:
+            wanted = {k: v for k, v in params.items() if k in rule.params}
+            code, c = self.stepup.check(req.step_up, principal_id=caller.principal_id, agent_id=caller.agent_id,
+                                        intent=intent or "", params=wanted)
+            if code == "pending" and c is not None:
+                params = wanted
+                checks.append(Check("step_up", "handoff",
+                                    f"Still waiting for {caller.principal_name} to approve {c.id} "
+                                    f"(strength {c.strength}/{c.required_strength}). Polls don't count toward "
+                                    "session limits."))
+                return done("step_up_required", f"Still waiting for {caller.principal_name}'s approval.",
+                            reason="step_up_required", retry_after=STEP_UP_POLL_SECONDS,
+                            step_up={"challenge_id": c.id, "expires_at": int(c.expires_at),
+                                     "required_strength": c.required_strength,
+                                     "methods": self.stepup.methods_public()},
+                            data={"step_up_challenge": c.id})
         breach = self.guard.begin_turn(s, intent or "free_text", params if body else {"text": req.text})
         if breach:
-            ticket = self._open_ticket(s, agent, intent or "free_text", params, breach.code, breach.reason, "high")
+            ticket = self._open_ticket(s, caller, intent or "free_text", params, breach.code, breach.reason, "high",
+                                       self.policy.handoff.runaway_response_hours)
             self.guard.lock(s, breach.reason, ticket.id)
             checks.append(Check("escalation", "handoff", f"{breach.reason} Handed to a person ({ticket.id})."))
             return done("escalated", f"I've handed this to a person at {self.policy.business_name} "
-                                     f"(ticket {ticket.id}). They'll follow up with {agent.principal.name}.",
-                        agent=agent_info, intent=intent, params=params, ticket_id=ticket.id)
+                                     f"(ticket {ticket.id}). Stop retrying; they'll follow up.",
+                        reason=breach.code, ticket_id=ticket.id, **self._ticket_kw(ticket))
 
-        # 3. Protocol: structured intents only -----------------------------------------------
+        # 3. Protocol: structured intents only -------------------------------------------
         if not intent:
             verdict = await self.shield.scan({"text": req.text})
             if verdict.blocked:
@@ -202,21 +302,23 @@ class Gateway:
                 checks.append(Check("protocol", "warn", "Free text instead of a structured intent."))
                 checks.append(Check("security", "fail", f"Injection blocked (score {verdict.score}): {verdict.summary}"))
                 return done("denied", "Request blocked: it contains instructions aimed at our agent. "
-                                      "This has been logged.", agent=agent_info, data={"error": "injection",
-                                                                                    "families": verdict.families})
+                                      "This has been logged.", reason="security",
+                            codes=["security", *verdict.families], data={"error": "injection",
+                                                                        "families": verdict.families})
             checks.append(Check("protocol", "warn",
-                                "Free-text request. Agents talk in structured intents here: sent back the catalog."))
+                                "Free-text request. Agents use structured intents here: sent back the catalog."))
+            catalog = self.catalog() if caller.verified else self._open_catalog()
             return done("needs_structure",
                         f"{self.policy.business_name} accepts structured A2A requests from agents. "
-                        "Pick one of the intents in the catalog and resend.",
-                        agent=agent_info, data={"intents": self.catalog(), "your_text_received": bool(req.text)})
-        rule = self.policy.intents.get(intent)
+                        "Pick an intent from the catalog and resend.", reason="needs_structure",
+                        next_steps=["Resend as a DataPart: {\"intent\": ..., \"params\": {...}}"],
+                        data={"intents": catalog, "your_text_received": bool(req.text)})
         if rule is None:
             self.guard.record_denial(s)
             checks.append(Check("protocol", "fail", f"Unknown intent “{intent}”."))
             return done("denied", f"“{intent}” isn't something this business handles over A2A.",
-                        agent=agent_info, intent=intent, params=params,
-                        data={"error": "unknown_intent", "intents": self.catalog()})
+                        reason="unknown_intent", data={"error": "unknown_intent", "intents": self.catalog()})
+        raw_params = dict(params)
         stripped = sorted(set(params) - set(rule.params))
         params = {k: v for k, v in params.items() if k in rule.params}
         if len(note) > self.policy.limits.max_note_chars:
@@ -224,15 +326,15 @@ class Gateway:
             checks.append(Check("protocol", "fail",
                                 f"Note is {len(note)} chars (max {self.policy.limits.max_note_chars})."))
             return done("denied", "The free-text note is too long. Put the request in structured parameters.",
-                        agent=agent_info, intent=intent, params=params, data={"error": "note_too_long"})
-        detail = f"Structured intent “{intent}” ({rule.risk} risk) with params {sorted(params) or '[]'}."
+                        reason="note_too_long", data={"error": "note_too_long"})
+        detail = f"Structured intent “{intent}”, {rule.tier} tier, params {sorted(params) or '[]'}."
         if stripped:
             detail += f" Stripped non-whitelisted params {stripped}."
         checks.append(Check("protocol", "warn" if stripped else "pass", detail))
 
-        # 4. Security: injection aimed at the business agent ---------------------------------
+        # 4. Security: injection aimed at the business agent -----------------------------
         verdict = await self.shield.scan({"params": params, "note": note, "text": req.text,
-                                          "stripped": {k: (body or {}).get("params", {}).get(k) for k in stripped}})
+                                          "stripped": {k: raw_params.get(k) for k in stripped}})
         if verdict.blocked:
             self.guard.record_denial(s)
             s.flagged = True
@@ -241,74 +343,135 @@ class Gateway:
                                 f"{verdict.summary}"))
             return done("denied", "Request blocked: it contains instructions aimed at our agent. "
                                   "This has been logged and the agent flagged.",
-                        agent=agent_info, intent=intent, params=params,
+                        reason="security", codes=["security", *verdict.families],
                         data={"error": "injection", "families": verdict.families, "score": verdict.score})
         checks.append(Check("security", "warn" if verdict.score > 0 else "pass",
                             f"Clean (score {verdict.score}, layers {'+'.join(verdict.layers)})."
                             if verdict.score == 0 else f"Low-confidence signal, allowed: {verdict.summary}"))
 
-        # 5. Delegation: is this agent allowed to do this, for this much? ---------------------
-        if not agent.has_scope(rule.scope):
-            self.guard.record_denial(s)
-            checks.append(Check("delegation", "fail",
-                                f"Needs scope “{rule.scope}”; passport grants {agent.scopes}."))
-            return done("denied", f"{agent.principal.name} hasn't authorized this agent to do that "
-                                  f"(needs {rule.scope}).", agent=agent_info, intent=intent, params=params,
-                        data={"error": "insufficient_scope", "required_scope": rule.scope})
-        if rule.amount_param:
-            try:
-                amount = float(params.get(rule.amount_param, 0))
-            except (TypeError, ValueError):
-                amount = float("inf")
-            caps = {"passport": agent.limits.get("max_amount_inr"), "business policy": rule.max_amount_inr}
-            caps = {k: float(v) for k, v in caps.items() if v is not None}
-            if caps and amount > min(caps.values()):
-                which = min(caps, key=caps.get)
+        # 5. Delegation: is this agent allowed to do this, for this much? -----------------
+        if rule.tier == "open":
+            checks.append(Check("delegation", "pass", "Open tier: anyone may ask, and no patient data comes back."))
+        else:
+            if not self._has_scope(caller, rule.scope or ""):
                 self.guard.record_denial(s)
                 checks.append(Check("delegation", "fail",
-                                    f"₹{amount:,.0f} exceeds the {which} limit of ₹{caps[which]:,.0f}."))
-                return done("denied", f"₹{amount:,.0f} is above what this agent may request "
-                                      f"(limit ₹{caps[which]:,.0f}). A person can review larger amounts.",
-                            agent=agent_info, intent=intent, params=params, data={"error": "over_limit"})
-            checks.append(Check("delegation", "pass",
-                                f"Scope “{rule.scope}” granted; ₹{amount:,.0f} within limit ₹{min(caps.values()):,.0f}."
-                                if caps else f"Scope “{rule.scope}” granted."))
-        else:
-            checks.append(Check("delegation", "pass", f"Scope “{rule.scope}” granted by {agent.principal.name}."))
+                                    f"Needs scope “{rule.scope}”; passport grants {caller.info['scopes']}."))
+                return done("denied", f"{caller.principal_name} hasn't authorized this agent to do that "
+                                      f"(needs {rule.scope}).", reason="insufficient_scope",
+                            next_steps=[f"Ask {caller.principal_name} to grant {rule.scope} in their identity app"],
+                            data={"error": "insufficient_scope", "required_scope": rule.scope})
+            detail = f"Scope “{rule.scope}” granted by {caller.principal_name}."
+            if rule.amount_param:
+                try:
+                    amount = float(params.get(rule.amount_param, 0))
+                except (TypeError, ValueError):
+                    amount = float("inf")
+                caps = {"passport": caller.info["limits"].get("max_amount_inr"),
+                        "business policy": rule.max_amount_inr}
+                caps = {k: float(v) for k, v in caps.items() if v is not None}
+                if caps and amount > min(caps.values()):
+                    which = min(caps, key=caps.get)
+                    self.guard.record_denial(s)
+                    checks.append(Check("delegation", "fail",
+                                        f"₹{amount:,.0f} exceeds the {which} limit of ₹{caps[which]:,.0f}. "
+                                        "Refused before asking the patient to approve anything."))
+                    return done("denied", f"₹{amount:,.0f} is above what this agent may request "
+                                          f"(limit ₹{caps[which]:,.0f}). A person can review larger amounts.",
+                                reason="over_limit", data={"error": "over_limit"})
+                if caps:
+                    detail = f"Scope “{rule.scope}” granted; ₹{amount:,.0f} within limit ₹{min(caps.values()):,.0f}."
+            checks.append(Check("delegation", "pass", detail))
 
-        # 6. Handoff rules: contested / sensitive intents go to a person ---------------------
-        if rule.mode == "human":
-            existing = s.open_tickets.get(intent)
-            if existing and self.escalations.tickets.get(existing) and \
-                    self.escalations.tickets[existing].status == "open":
+        # 6. Human-only actions go to a person, before anyone is asked to approve anything -
+        if rule.tier == "human":
+            checks.append(Check("step_up", "skip", "Not needed: a person decides this."))
+            existing = self.escalations.tickets.get(s.open_tickets.get(intent, ""))
+            if existing and existing.status == "open":
                 checks.append(Check("escalation", "handoff",
-                                    f"Ticket {existing} is already open for “{intent}”. Repeat push not forwarded; "
-                                    "pressing again doesn't change who decides."))
-                return done("escalated", f"Ticket {existing} is already with a person at "
-                                         f"{self.policy.business_name}. Repeating the request won't speed it up; "
-                                         f"they'll contact {agent.principal.name}.",
-                            agent=agent_info, intent=intent, params=params, ticket_id=existing)
-            ticket = self._open_ticket(s, agent, intent, params, "human_only_intent",
-                                       f"“{intent}” is {rule.risk}-risk and always decided by a person.", rule.risk)
+                                    f"Ticket {existing.id} is already open for “{intent}”. Repeat push not "
+                                    "forwarded; pressing again doesn't change who decides."))
+                return done("escalated", f"Ticket {existing.id} is already with a person at "
+                                         f"{self.policy.business_name}. Don't retry; they'll contact "
+                                         f"{caller.principal_name}.", reason="repeat",
+                            codes=["human_only", "already_open"], ticket_id=existing.id,
+                            **self._ticket_kw(existing, repeat=True))
+            hours = rule.response_hours or self.policy.handoff.default_response_hours
+            ticket = self._open_ticket(s, caller, intent, params, "human_only_intent",
+                                       f"“{intent}” is always decided by a person.", "high", hours)
             s.open_tickets[intent] = ticket.id
             checks.append(Check("escalation", "handoff",
-                                f"“{intent}” is human-only by policy. Ticket {ticket.id} opened with full context."))
-            return done("escalated", f"A person at {self.policy.business_name} handles {intent.replace('_', ' ')}. "
-                                     f"Ticket {ticket.id} is open and they'll contact {agent.principal.name}.",
-                        agent=agent_info, intent=intent, params=params, ticket_id=ticket.id)
+                                f"“{intent}” is human-only by policy. Ticket {ticket.id} opened with full context; "
+                                f"answer due by {_when(ticket.expected_by)}."))
+            return done("escalated", f"A person at {self.policy.business_name} handles "
+                                     f"{intent.replace('_', ' ')}. Ticket {ticket.id} is open.",
+                        reason="human_only", ticket_id=ticket.id, **self._ticket_kw(ticket))
+
+        # 7. Step-up: binding actions need the customer's own approval for this action ----
+        step_evidence: Challenge | None = None
+        if rule.tier != "binding":
+            checks.append(Check("step_up", "skip", f"Not needed: {rule.tier} tier."))
+        else:
+            summary = action_summary(rule, params)
+            code, c = ("missing", None)
+            if req.step_up:
+                code, c = self.stepup.check(req.step_up, principal_id=caller.principal_id, agent_id=caller.agent_id,
+                                            intent=intent, params=params)
+            if code == "ok" and c:
+                self.stepup.consume(c, rid)
+                step_evidence = c
+                checks.append(Check("step_up", "pass",
+                                    f"{caller.principal_name} approved this exact action ({c.id}) with "
+                                    f"{' + '.join(c.factors)}, strength {c.strength}/{c.required_strength}."))
+            elif code == "mismatch" and c:
+                self.guard.record_denial(s)
+                checks.append(Check("step_up", "fail",
+                                    f"Approval {c.id} covers “{c.summary}”, not this request. Approvals are bound "
+                                    "to one exact action."))
+                return done("denied", f"Approval {c.id} is for a different action. Nothing was done.",
+                            reason="step_up_mismatch", data={"error": "step_up_mismatch"})
+            elif code == "declined" and c:
+                checks.append(Check("step_up", "fail", f"{caller.principal_name} declined {c.id}."))
+                return done("denied", f"{caller.principal_name} declined this request. Nothing was done.",
+                            reason="step_up_declined", data={"error": "step_up_declined"})
+            else:
+                fresh = code != "pending" or c is None
+                if fresh:
+                    c = self.stepup.create(agent_id=caller.agent_id, agent_name=caller.name,
+                                           principal_id=caller.principal_id, principal_name=caller.principal_name,
+                                           intent=intent, params=params, summary=summary)
+                why = {"missing": "", "pending": " Still waiting for the patient.",
+                       "expired": " The earlier approval request expired.", "used": " That approval was already used.",
+                       "unknown": " That approval id isn't known."}.get(code, "")
+                checks.append(Check("step_up", "handoff",
+                                    f"Binding action: asked {caller.principal_name} to approve “{summary}” on their "
+                                    f"own device ({c.id}, needs strength {c.required_strength}).{why}"))
+                return done("step_up_required",
+                            f"{caller.principal_name} must approve this on their own device. Resend the same request "
+                            f"with dwarpal_step_up={c.id} once approved.",
+                            reason="step_up_required", retry_after=STEP_UP_POLL_SECONDS,
+                            next_steps=[f"Relay the customer message to {caller.principal_name}",
+                                        f"After approval, resend the identical request with "
+                                        f"metadata dwarpal_step_up={c.id}",
+                                        f"The approval expires at {_when(c.expires_at)}"],
+                            step_up={"challenge_id": c.id, "expires_at": int(c.expires_at),
+                                     "required_strength": c.required_strength,
+                                     "methods": self.stepup.methods_public()},
+                            data={"step_up_challenge": c.id})
+
         L = self.policy.limits
         checks.append(Check("escalation", "pass",
                             f"Turn {s.turns}/{L.max_turns_per_session}, cost {s.cost_units}/"
                             f"{L.max_cost_units_per_session}, no loop, {s.denials} refusals so far."))
 
-        # 7. Business agent (ADK) ------------------------------------------------------------
-        task = BusinessTask(session_id=req.session_id, agent_id=agent.agent_id, agent_name=agent.agent_name,
-                            principal_id=agent.principal.id, principal_name=agent.principal.name,
-                            intent=intent, params=params)
+        # 8. Business agent (ADK), which writes only through the shared business service --
+        task = BusinessTask(session_id=req.session_id, agent_id=caller.agent_id, agent_name=caller.name,
+                            principal_id=caller.principal_id, principal_name=caller.principal_name or "anonymous",
+                            intent=intent, params=params, tier=rule.tier)
         result = await self.backend.run(task)
         s.cost_units += max(result.model_calls, 1)
 
-        # 8. Data guard ----------------------------------------------------------------------
+        # 9. Data guard ------------------------------------------------------------------
         clean_data, r1 = filter_outbound(result.data, self.policy.data)
         clean_msg, r2 = filter_outbound(result.message, self.policy.data)
         redactions = r1 + r2
@@ -320,15 +483,24 @@ class Gateway:
         status = str(clean_data.get("status", "ok"))
         outcome = "rejected" if status in {"rejected", "not_found"} else "completed"
 
+        # 10. Customer message, then a receipt that covers it ----------------------------
+        fields = {**enrich(params), "action_summary": action_summary(rule, params),
+                  **{k: v for k, v in clean_data.items() if isinstance(v, (str, int, float))},
+                  "business_reason": clean_data.get("message", "")}
+        cm = customer_message(self.policy, outcome, intent=intent, reason=None, fields=fields)
+        cm, _ = filter_outbound(cm, self.policy.data)
         receipt = None
-        if outcome == "completed":
+        if outcome == "completed" and caller.verified:
             receipt = self.audit.issue_receipt({
-                "rid": rid, "business": self.policy.business_id, "agent": agent.agent_id,
-                "principal": agent.principal.id, "intent": intent, "params": params,
+                "rid": rid, "business": self.policy.business_id, "agent": caller.agent_id,
+                "principal": caller.principal_id, "intent": intent, "tier": rule.tier, "params": params,
                 "request_hash": body_hash(req.signed_body), "result_hash": body_hash(clean_data),
-                "result_status": status,
+                "result_status": status, "customer_message_sha256": message_hash(cm),
+                "step_up": ({"challenge": step_evidence.id, "factors": step_evidence.factors,
+                             "strength": step_evidence.strength} if step_evidence else None),
             })
-        return done(outcome, clean_msg or "Done.", agent=agent_info, intent=intent, params=params,
+        return done(outcome, clean_msg or "Done.", cm=cm,
+                    codes=["ok"] if outcome == "completed" else ["business_rule", status],
                     data=clean_data, receipt=receipt)
 
     # ------------------------------------------------------------------ helpers
@@ -337,13 +509,36 @@ class Gateway:
     def _rid() -> str:
         return f"req_{uuid.uuid4().hex[:10]}"
 
-    def _open_ticket(self, s: SessionState, agent: VerifiedAgent, intent: str, params: dict[str, Any],
-                     code: str, reason: str, risk: str):
+    @staticmethod
+    def _has_scope(caller: Caller, scope: str) -> bool:
+        scopes = caller.info.get("scopes") or []
+        return scope in scopes or f"{scope.split(':', 1)[0]}:*" in scopes
+
+    def _open_catalog(self) -> list[dict[str, Any]]:
+        return [i for i in self.catalog() if i["tier"] == "open"]
+
+    def _ticket_kw(self, t: Any, repeat: bool = False) -> dict[str, Any]:
+        if t is None:
+            return {}
+        wait = max(t.expected_by - time.time(), 0)
+        return {
+            "join_code": None if repeat else t.join_code,
+            "retry_after": wait,
+            "expected_by": t.expected_by,
+            "next_steps": ([f"Tell the customer their reference is {t.id}"]
+                           + ([] if repeat else [f"Give them join code {t.join_code} to join the case directly"])
+                           + [f"Don't retry before {_when(t.expected_by)}"]),
+            "fields": {"ticket_id": t.id, "join_code": t.join_code, "expected_by_human": _when(t.expected_by)},
+        }
+
+    def _open_ticket(self, s: SessionState, caller: Caller, intent: str, params: dict[str, Any],
+                     code: str, reason: str, risk: str, response_hours: float):
         return self.escalations.open(
-            session_id=s.session_id, agent_id=agent.agent_id, agent_name=agent.agent_name,
-            principal={"id": agent.principal.id, "name": agent.principal.name}, intent=intent, params=params,
+            response_hours=response_hours, join_ttl_hours=self.policy.handoff.join_code_ttl_hours,
+            session_id=s.session_id, agent_id=caller.agent_id, agent_name=caller.name,
+            principal={"id": caller.principal_id, "name": caller.principal_name}, intent=intent, params=params,
             reason_code=code, reason=reason, risk=risk,
-            history=list(self.history.get(self._hkey(s.session_id, agent.agent_id), []))[-10:],
+            history=list(self.history.get(self._hkey(s.session_id, caller.agent_id), []))[-10:],
         )
 
     @staticmethod
@@ -353,10 +548,13 @@ class Gateway:
     def _finalise(self, req: InboundRequest, d: Decision) -> None:
         record = self.audit.append(
             "agent_request",
-            rid=d.request_id, session=d.session_id, outcome=d.outcome,
+            rid=d.request_id, session=d.session_id, outcome=d.outcome, tier=d.tier,
             agent=(d.agent or {}).get("id"), principal=((d.agent or {}).get("principal") or {}).get("id"),
             intent=d.intent, params=d.params, ticket=d.ticket_id,
+            step_up=(d.step_up or {}).get("challenge_id") or (d.data or {}).get("step_up_challenge"),
             request_hash=body_hash(req.signed_body),
+            customer_message_sha256=message_hash(d.customer_message) if d.customer_message else None,
+            reason_codes=d.agent_outcome.get("reason_codes"),
             checks={c.name: c.status for c in d.checks},
             reasons={c.name: c.detail for c in d.checks if c.status in {"fail", "handoff"}},
             receipt=bool(d.receipt),
@@ -364,7 +562,8 @@ class Gateway:
         d.audit_seq = record["seq"]
         d.checks.append(Check("audit", "pass",
                               f"Record #{record['seq']} chained to {record['prev'][:10]}… and signed"
-                              + ("; signed receipt returned to the caller." if d.receipt else ".")))
+                              + ("; signed receipt (covering the customer message) returned." if d.receipt
+                                 else ".")))
         if d.agent:
             self.history[self._hkey(d.session_id, d.agent["id"])].append(
                 {"rid": d.request_id, "intent": d.intent, "outcome": d.outcome, "reply": d.reply[:200]})

@@ -1,76 +1,133 @@
-# Dwarpal policy for a business that accepts calls from customers' AI agents.
-# Everything the gateway enforces is declared here, so the business (not the model) owns the rules.
+# Dwarpal policy for a business that accepts requests from customers' AI agents.
+#
+# Gate the action, not the caller. Each action declares the proof it needs; who is calling only
+# decides which lane the request travels in. The business owns these rules, not the model.
 
 business:
   id: clinic.sunrise.example        # the passport 'aud' callers must present
   name: Sunrise Family Clinic
   description: Front desk AI for appointments at a family clinic.
+  contact: the Sunrise front desk
 
 # Identity providers whose agent passports we accept (keys live in the trust store).
 trusted_issuers:
   - id: idp.healthwallet.example
     label: HealthWallet patient identity
 
-# What a caller's agent may ask for. Anything not listed is refused.
-#   scope : passport scope required
-#   mode  : a2a   -> handled agent-to-agent, structured, fast
-#           human -> always handed to a person (contested, sensitive or binding)
-#   risk  : low | medium | high (shown in audit and dashboard)
-#   params: allowed parameters; anything else is stripped before the business agent sees it
+# Tiers: what proof an action needs, whoever is asking.
+#   open    : anyone, including anonymous agents. Never returns patient data.
+#   account : a verified agent passport with the right scope for this patient.
+#   binding : passport + the patient's own approval (step-up) for this exact action.
+#   human   : always decided by a person; the gateway opens a ticket.
+#
+# Intent fields:
+#   scope     : passport scope required (account and binding tiers)
+#   params    : allowed parameters; anything else is stripped before the business sees it
+#   summary   : how the action is described to the patient, e.g. in an approval prompt
 intents:
+  clinic_info:
+    tier: open
+    description: Clinic hours, address and accepted insurers.
+    params: [topic]
+    summary: "get clinic information"
+  list_slots:
+    tier: open
+    description: List open slots for a doctor on a date.
+    params: [doctor, date]
+    summary: "check {doctor}'s open slots on {date}"
   appointment_status:
+    tier: account
     description: Look up an existing appointment.
     scope: appointments:read
-    mode: a2a
-    risk: low
     params: [appointment_id]
-  list_slots:
-    description: List open slots for a doctor on a date.
-    scope: appointments:read
-    mode: a2a
-    risk: low
-    params: [doctor, date]
+    summary: "check appointment {appointment_id}"
   reschedule_appointment:
+    tier: account                   # reversible and low-risk, so delegation is enough
     description: Move an appointment to a new open slot.
     scope: appointments:write
-    mode: a2a
-    risk: low
     params: [appointment_id, new_slot]
+    summary: "move appointment {appointment_id} to {new_slot_human}"
   cancel_appointment:
+    tier: binding
     description: Cancel an appointment.
     scope: appointments:write
-    mode: a2a
-    risk: medium
     params: [appointment_id, reason]
+    summary: "cancel appointment {appointment_id}"
   refund_copay:
+    tier: binding
     description: Refund a co-pay for a cancelled visit.
     scope: billing:write
-    mode: a2a
-    risk: medium
     params: [appointment_id, amount_inr]
     amount_param: amount_inr
-    max_amount_inr: 1500          # business-side ceiling, applied on top of the passport's own limit
+    max_amount_inr: 1500            # business ceiling, applied on top of the passport's own limit
+    summary: "refund ₹{amount_inr} for appointment {appointment_id}"
   billing_dispute:
+    tier: human
     description: Dispute a charge. Contested by nature, so a person decides.
     scope: billing:write
-    mode: human
-    risk: high
     params: [invoice_id, reason]
+    summary: "dispute invoice {invoice_id}"
+    response_hours: 24
   medical_records:
+    tier: human
     description: Prescriptions, lab results, diagnoses. Never released to an agent.
     scope: records:read
-    mode: human
-    risk: high
     params: [record_type]
+    summary: "access medical records"
+    response_hours: 48
+
+# Customer step-up for binding actions (modelled on OpenID CIBA: the agent asks, the patient
+# approves on their own device). Each method has a strength; binding actions need a total of
+# `required_strength`. A voiceprint counts for at most 1, because a clean 8-12 second sample is
+# enough to clone a voice. Methods marked accessible work without speaking.
+step_up:
+  required_strength: 2
+  ttl_seconds: 300
+  methods:
+    app_biometric: {label: "Approve in the HealthWallet app (fingerprint or face)", strength: 2, accessible: true}
+    sms_code:      {label: "Code sent by SMS to the registered number", strength: 1, accessible: true}
+    keypad_pin:    {label: "Clinic PIN on the keypad", strength: 1, accessible: true}
+    voice_liveness: {label: "Voiceprint with liveness check", strength: 1, accessible: false}
 
 # Guards against runaway or adversarial agent loops.
 limits:
   max_turns_per_session: 8            # requests per A2A context before a human takes over
   max_cost_units_per_session: 20      # rough compute budget (1 unit per model call)
   max_requests_per_minute: 20         # per agent
+  max_anonymous_requests_per_minute: 60   # all anonymous open-tier callers together
   max_identical_requests: 3           # same intent + params repeated -> loop
   max_denials_per_session: 3          # repeatedly hitting walls -> probe, escalate
   max_note_chars: 400                 # free text is optional context, not a channel
+
+# Handoff to a person: how soon the patient hears back, and how long a join code lasts.
+handoff:
+  default_response_hours: 24
+  runaway_response_hours: 4           # loops, turn and cost limits
+  join_code_ttl_hours: 72
+
+# What the patient hears, written by the business. The calling agent is asked to relay it as-is,
+# and its hash goes into the signed receipt so anyone can check what was actually said.
+# Keys: <outcome>.<intent> first, then <outcome>.<reason>, then <outcome>.
+customer_messages:
+  completed.clinic_info: "{answer}"
+  completed.list_slots: "{doctor} has {slot_count} open slot(s) on {date_human}: {slot_times}."
+  completed.appointment_status: "Your appointment {appointment_id} with {doctor} is on {slot_human}. Status: {state}."
+  completed.reschedule_appointment: "Done. Your appointment with {doctor} is now on {new_slot_human}. Sunrise Family Clinic"
+  completed.cancel_appointment: "Your appointment {appointment_id} has been cancelled, as you approved. Sunrise Family Clinic"
+  completed.refund_copay: "We've refunded ₹{refunded_inr} for appointment {appointment_id}. It usually reaches you in 3 to 5 working days."
+  rejected: "We couldn't do that. {business_reason} You can also reach {contact}."
+  step_up_required: "Sunrise Family Clinic needs your approval to {action_summary}. Please check your HealthWallet app."
+  denied.insufficient_scope: "Your assistant isn't set up to {action_summary} for you. You can allow it in HealthWallet, or contact {contact}."
+  denied.over_limit: "That amount is more than your assistant is allowed to request. Please contact {contact} and we'll help."
+  denied.security: "We couldn't complete this request through your assistant. Please contact {contact} directly."
+  denied.identity: "We couldn't confirm who this request is from, so we haven't acted on it. Please contact {contact}."
+  denied.step_up_mismatch: "Your approval covered a different request, so we haven't acted on this one."
+  denied.step_up_declined: "You declined this request, so we haven't acted on it."
+  denied.missing_passport: "Your assistant needs to be connected to your HealthWallet account before it can do this for you."
+  denied: "We couldn't complete this request. Please contact {contact}."
+  escalated: "A member of our team will contact you about this by {expected_by_human}. Your reference is {ticket_id}, and your join code is {join_code}."
+  escalated.repeat: "Your case {ticket_id} is already with our team. They'll contact you by {expected_by_human}."
+  needs_structure: "Your assistant is talking to Sunrise Family Clinic's automated desk."
 
 # Fields the business agent must never send back to an agent, whatever it was asked.
 data_policy:

@@ -29,7 +29,7 @@ class DemoWorld:
     @classmethod
     def load(cls, data_dir: Path, audience: str) -> "DemoWorld":
         kdir = data_dir / "demo-keys"
-        names = ["riya_assistant", "medifetch", "disputebot", "attacker", "attacker_issuer"]
+        names = ["riya_assistant", "medifetch", "disputebot", "attacker", "attacker_issuer", "guest"]
         return cls(audience=audience, issuer_key=KeyPair.load_or_create(kdir / "healthwallet-issuer.pem"),
                    keys={n: KeyPair.load_or_create(kdir / f"{n}.pem") for n in names})
 
@@ -65,4 +65,6 @@ class DemoWorld:
                 issuer_key=self.keys["attacker_issuer"])),
             # No passport at all.
             "anonymous": make("attacker", "Anonymous caller", None),
+            # A generic booking agent with no passport: fine for open-tier questions.
+            "guest": make("guest", "Guest booking agent", None),
         }

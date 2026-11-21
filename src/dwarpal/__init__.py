@@ -1,13 +1,16 @@
-"""Dwarpal (द्वारपाल) — the gatekeeper for inbound AI-agent traffic.
+"""Dwarpal (द्वारपाल): gate the action, not the caller.
 
-When a customer's AI agent calls a business's AI agent, Dwarpal sits in between and answers:
+A policy and enforcement layer for AI agents calling a business. Every action declares the proof it
+needs (open, account, binding, human), and the gateway checks it the same way whoever is asking:
 
-1. Identity     — is the caller an AI agent, and who does it act for?
-2. Delegation   — what is it authorized to do, and up to what limit?
-3. Security     — is it trying to prompt-inject the business agent?
-4. Protocol     — cooperative, rule-bound tasks go over structured A2A, not free text.
-5. Escalation   — contested or high-stakes cases go to a human early; turn, cost and loop limits.
-6. Audit        — a tamper-evident, signed record of what each agent asked for and agreed to.
+  Identity    signed agent passports and per-request proofs (optional for open-tier actions)
+  Protocol    structured A2A intents only; the caller's text never reaches the business agent
+  Security    layered prompt-injection shield
+  Delegation  scopes and money limits from the passport and the business policy
+  Step-up     binding actions need the customer's own approval of that exact action
+  Escalation  contested matters and runaway agents go to a person, with a due time and join code
+  Data guard  fields that must never leave are dropped, PII redacted
+  Audit       hash-chained, signed log; receipts that cover what the customer was told
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

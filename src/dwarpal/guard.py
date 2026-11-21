@@ -48,15 +48,15 @@ class SessionGuard:
             self.sessions[key] = SessionState(session_id=session_id, agent_id=agent_id, principal_id=principal_id)
         return self.sessions[key]
 
-    def check_rate(self, agent_id: str, now: float | None = None) -> LimitBreach | None:
+    def check_rate(self, agent_id: str, now: float | None = None, limit: int | None = None) -> LimitBreach | None:
         now = time.time() if now is None else now
+        limit = limit or self.limits.max_requests_per_minute
         window = self._rate[agent_id]
         while window and window[0] < now - 60:
             window.popleft()
         window.append(now)
-        if len(window) > self.limits.max_requests_per_minute:
-            return LimitBreach("rate_limited", f"{len(window)} requests in the last minute "
-                                               f"(limit {self.limits.max_requests_per_minute}).")
+        if len(window) > limit:
+            return LimitBreach("rate_limited", f"{len(window)} requests in the last minute (limit {limit}).")
         return None
 
     def begin_turn(self, s: SessionState, intent: str, params: dict) -> LimitBreach | None:

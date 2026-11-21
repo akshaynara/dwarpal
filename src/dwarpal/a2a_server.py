@@ -54,7 +54,8 @@ def parse_a2a_request(ctx: RequestContext) -> InboundRequest:
         passport = auth.split(" ", 1)[1].strip()
     proof = meta.get("dwarpal_proof") or headers.get("x-dwarpal-proof")
     return InboundRequest(session_id=ctx.context_id or "no-context", body=envelope, text=text,
-                          passport=passport, proof=proof, tag=meta.get("dwarpal_tag"))
+                          passport=passport, proof=proof, step_up=meta.get("dwarpal_step_up"),
+                          tag=meta.get("dwarpal_tag"))
 
 
 class GatewayExecutor(AgentExecutor):
@@ -67,10 +68,15 @@ class GatewayExecutor(AgentExecutor):
             "dwarpal": "1",
             "request_id": decision.request_id,
             "outcome": decision.outcome,
+            "tier": decision.tier,
+            "agent_outcome": decision.agent_outcome,
+            "customer_message": decision.customer_message,
             "checks": [{"name": c.name, "status": c.status, "detail": c.detail} for c in decision.checks],
             "data": decision.data,
             "receipt": decision.receipt,
             "ticket_id": decision.ticket_id,
+            "join_code": decision.join_code,
+            "step_up": decision.step_up,
             "audit_seq": decision.audit_seq,
         }
         reply = new_message([new_text_part(decision.reply), new_data_part(payload)],
@@ -84,10 +90,11 @@ class GatewayExecutor(AgentExecutor):
 def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, Any]]) -> AgentCard:
     return AgentCard(
         name=f"{policy.business_name} (via Dwarpal)",
-        description=(f"{policy.description} Inbound AI agents must present a Dwarpal agent passport from a "
-                     "trusted issuer and sign each request. Structured intents only; contested matters go to "
-                     "a person."),
-        version="0.1.0",
+        description=(f"{policy.description} Each action declares the proof it needs: open actions need none, "
+                     "account actions need a Dwarpal agent passport from a trusted issuer with every request "
+                     "signed, binding actions also need the customer's own approval, and contested matters go "
+                     "to a person. Structured intents only."),
+        version="0.2.0",
         provider=AgentProvider(organization=policy.business_name, url=public_url),
         supported_interfaces=[AgentInterface(url=f"{public_url.rstrip('/')}/a2a", protocol_binding="JSONRPC",
                                              protocol_version="1.0")],
@@ -101,7 +108,10 @@ def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, An
         default_input_modes=["application/json", "text/plain"],
         default_output_modes=["application/json", "text/plain"],
         skills=[AgentSkill(id=i["intent"], name=i["intent"].replace("_", " ").title(),
-                           description=f"{i['description']} Scope: {i['scope']}. Params: {', '.join(i['params'])}.",
-                           tags=[i["scope"]], input_modes=["application/json"])
-                for i in catalog],
+                           description=(f"{i['description']} Tier: {i['tier']}."
+                                        + (f" Scope: {i['scope']}." if i["scope"] else "")
+                                        + f" Params: {', '.join(i['params'])}."),
+                           tags=[f"tier:{i['tier']}"] + ([i["scope"]] if i["scope"] else []),
+                           input_modes=["application/json"])
+                for i in catalog if i["tier"] != "human"],
     )

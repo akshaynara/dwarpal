@@ -10,7 +10,7 @@ import sys
 
 STATUS_ICON = {"pass": "✔", "fail": "✘", "warn": "!", "handoff": "→", "skip": "·"}
 OUTCOME_COLOR = {"completed": "32", "rejected": "33", "denied": "31", "escalated": "35", "needs_structure": "36",
-                 "error": "31"}
+                 "step_up_required": "35", "approved": "32", "needs_more": "33", "joined": "32", "error": "31"}
 
 
 def _c(code: str, text: str) -> str:
@@ -41,8 +41,9 @@ async def _demo(only: list[str] | None, verbose: bool) -> int:
         for scenario in sc.SCENARIOS:
             if only and scenario.id not in only:
                 continue
-            rt.clinic.reset()
-            result = await sc.run_scenario(scenario.id, rt.world.callers(http, rt.settings.public_url))
+            rt.service.reset()
+            stage = sc.Stage(callers=rt.world.callers(http, rt.settings.public_url), approve=rt.approve, join=rt.join)
+            result = await sc.run_scenario(scenario.id, stage)
             ok = result["as_expected"]
             failures += 0 if ok else 1
             print(_c("1", f"▶ {scenario.title}") + ("" if ok else _c("31", "  (unexpected outcome)")))
@@ -51,6 +52,9 @@ async def _demo(only: list[str] | None, verbose: bool) -> int:
                 outcome = step["outcome"]
                 print(f"   • {step['label']}")
                 print(f"     {_c(OUTCOME_COLOR.get(outcome, '0'), outcome.upper())}  {step['reply']}")
+                cm = step["payload"].get("customer_message")
+                if cm and (verbose or outcome not in {"completed"}):
+                    print(f"     customer hears: “{cm}”")
                 for chk in step["payload"].get("checks", []):
                     if verbose or chk["status"] in {"fail", "handoff"}:
                         print(f"       {STATUS_ICON.get(chk['status'], '?')} {chk['name']}: {chk['detail']}")

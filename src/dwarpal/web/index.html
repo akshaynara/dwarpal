@@ -109,8 +109,9 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .outcome.denied, .outcome.error { background: var(--fail-soft); color: var(--fail); }
 .outcome.escalated { background: var(--handoff-soft); color: var(--handoff); }
 .outcome.needs_structure { background: var(--brass-soft); color: var(--brass); }
+.outcome.step_up_required { background: var(--handoff-soft); color: var(--handoff); }
 
-.track { position: relative; margin: 34px 0 10px; display: grid; grid-template-columns: 90px repeat(7, minmax(0, 1fr)) 90px; align-items: end; }
+.track { position: relative; margin: 34px 0 10px; display: grid; grid-template-columns: 90px repeat(8, minmax(0, 1fr)) 90px; align-items: end; }
 .track::before {
   content: ""; position: absolute; left: 45px; right: 45px; top: var(--line-y, 70px); margin-top: -2px; height: 4px; border-radius: 2px;
   background: repeating-linear-gradient(90deg, var(--line) 0 10px, transparent 10px 16px);
@@ -150,10 +151,40 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .token.hidden { opacity: 0; }
 .track.instant, .track.instant * { transition: none !important; }
 
-.reply {
-  margin: 22px 0 4px; padding: 14px 16px; border-left: 4px solid var(--brass); background: var(--stone);
-  border-radius: 0 10px 10px 0; font-size: 17px; line-height: 1.5;
-}
+.msgs { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 22px 0 4px; }
+@media (max-width: 1100px) { .msgs { grid-template-columns: 1fr; } }
+.msg { padding: 14px 16px; border-radius: 10px; background: var(--stone); }
+.msg .who { display: block; font-size: 13px; font-weight: 700; color: var(--ink-2); margin-bottom: 6px; }
+.msg p { margin: 0; font-size: 16px; line-height: 1.5; }
+.msg.customer { background: var(--paper); border: 2px solid var(--brass-soft); }
+.msg.customer p { font-size: 17px; }
+.msg.customer.empty-msg p { color: var(--ink-3); font-size: 15px; }
+.next { margin: 10px 0 0; padding-left: 18px; font-size: 13.5px; color: var(--ink-2); }
+.next li { margin: 2px 0; }
+.tier { display: inline-block; margin-top: 10px; font: 700 13px/1 var(--body); padding: 6px 10px; border-radius: 6px; background: var(--stone); color: var(--ink-2); letter-spacing: 0; }
+.tier.open { background: var(--pass-soft); color: var(--pass); }
+.tier.account { background: var(--stone-2); color: var(--ink); }
+.tier.binding { background: var(--handoff-soft); color: var(--handoff); }
+.tier.human { background: var(--warn-soft); color: var(--warn); }
+/* phone */
+.phone-card { border: 2px solid var(--ink); border-radius: 22px; padding: 14px 14px 12px; background: var(--paper); }
+.phone-card.ringing { animation: ring .9s ease-out 2; }
+@keyframes ring { 0% { box-shadow: 0 0 0 0 rgba(87,74,158,.45); } 100% { box-shadow: 0 0 0 16px rgba(87,74,158,0); } }
+.req .from { font-size: 13px; color: var(--ink-2); }
+.req .ask { font: 700 17px/1.3 var(--display); margin: 4px 0 8px; }
+.req .meter { height: 6px; background: var(--stone-2); border-radius: 3px; overflow: hidden; margin: 6px 0 10px; }
+.req .meter i { display: block; height: 100%; background: var(--handoff); transition: width .3s; }
+.req .methods { display: grid; gap: 6px; }
+.req .methods .btn { text-align: left; display: flex; justify-content: space-between; gap: 8px; font-weight: 400; }
+.req .methods .btn b { font-weight: 700; }
+.req .note { font-size: 13.5px; color: var(--ink-2); margin: 8px 0 0; }
+.req.done { opacity: .65; padding-top: 10px; margin-top: 10px; border-top: 1px solid var(--stone-2); }
+.req.done .ask { font-size: 15px; margin: 2px 0; }
+.req.done:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
+.btn.live { width: 100%; margin-bottom: 12px; background: var(--handoff); border-color: var(--handoff); color: #fff; }
+.btn.live:hover { border-color: var(--ink); }
+.ticket .due { font-size: 13.5px; color: var(--ink-2); margin: 0 0 8px; }
+.last-write { font-size: 13.5px; color: var(--ink-2); margin: 10px 0 0; }
 .checks { list-style: none; margin: 16px 0 0; padding: 0; display: grid; gap: 2px; }
 .checks li { display: grid; grid-template-columns: 110px 1fr; gap: 12px; padding: 7px 0; border-bottom: 1px solid var(--stone-2); font-size: 14.5px; }
 .checks li:last-child { border-bottom: 0; }
@@ -185,8 +216,8 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .row .dots i.fail { background: var(--fail); } .row .dots i.handoff { background: var(--handoff); }
 .row .oc { font-size: 13px; font-weight: 700; text-align: right; }
 .oc.completed { color: var(--pass); } .oc.rejected { color: var(--warn); } .oc.denied, .oc.error { color: var(--fail); }
-.oc.escalated { color: var(--handoff); } .oc.needs_structure { color: var(--brass); }
-@media (max-width: 820px) { .row { grid-template-columns: 1fr auto; } .row .when, .row .dots { display: none; } .track { grid-template-columns: 40px repeat(7, minmax(0,1fr)) 40px; } .end .disc { width: 34px; height: 34px; font-size: 10px; } .end span { display: none; } .pillar .name { display: none; } .pillar .shaft { height: 64px; } .checks li { grid-template-columns: 1fr; gap: 2px; } .caller { font-size: 21px; } }
+.oc.escalated, .oc.step_up_required { color: var(--handoff); } .oc.needs_structure { color: var(--brass); }
+@media (max-width: 820px) { .row { grid-template-columns: 1fr auto; } .row .when, .row .dots { display: none; } .track { grid-template-columns: 40px repeat(8, minmax(0,1fr)) 40px; } .end .disc { width: 34px; height: 34px; font-size: 10px; } .end span { display: none; } .pillar .name { display: none; } .pillar .shaft { height: 64px; } .checks li { grid-template-columns: 1fr; gap: 2px; } .caller { font-size: 21px; } }
 
 /* ---------- side panels ---------- */
 .ticket { border-top: 1px solid var(--stone-2); padding: 12px 0; }
@@ -222,7 +253,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
 <body>
 <header>
   <div class="brand"><span class="deva" lang="hi">द्वारपाल</span><span class="latin">Dwarpal</span></div>
-  <div class="biz">Guarding <strong id="bizName">…</strong> from inbound AI agents</div>
+  <div class="biz">Every AI agent calling <strong id="bizName">…</strong> passes this gate</div>
   <div class="spacer"></div>
   <span class="pill" id="modePill"><span class="dot"></span><span id="modeText">connecting</span></span>
   <button class="btn quiet" id="resetBtn" type="button">Reset demo</button>
@@ -231,13 +262,14 @@ tr.flash td { animation: flash 1.6s ease-out; }
 <main>
   <section class="panel" aria-labelledby="scnTitle">
     <h2 id="scnTitle">Send agents to the gate</h2>
+    <button class="btn live" id="liveBtn" type="button">Ask Riya to approve, live</button>
     <div class="scenarios" id="scenarios"></div>
     <button class="btn run-all" id="runAll" type="button">Run every scenario</button>
   </section>
 
   <section>
     <div class="panel gate-wrap" id="gate" aria-live="polite">
-      <div class="empty" id="gateEmpty">Pick a scenario. Each request from a caller's AI agent walks through the gate, and stops at the first check that refuses it.</div>
+      <div class="empty" id="gateEmpty">Pick a scenario. Each request walks through the checks its action needs, and stops at the first one that refuses it or needs a person.</div>
       <div id="gateBody" hidden>
         <div class="gate-head">
           <div class="caller" id="gCaller"></div>
@@ -249,7 +281,10 @@ tr.flash td { animation: flash 1.6s ease-out; }
           <div class="end biz-end" id="endBiz"><div class="disc">Clinic</div><span>Front desk</span></div>
           <div class="token hidden" id="token"></div>
         </div>
-        <div class="reply" id="gReply"></div>
+        <div class="msgs">
+          <div class="msg agent"><span class="who">The calling agent gets</span><p id="gReply"></p><ul class="next" id="gNext"></ul></div>
+          <div class="msg customer" id="gCustomerBox"><span class="who">The customer hears, word for word</span><p id="gCustomer"></p></div>
+        </div>
         <ul class="checks" id="gChecks"></ul>
         <div class="extras" id="gExtras"></div>
       </div>
@@ -262,6 +297,10 @@ tr.flash td { animation: flash 1.6s ease-out; }
   </section>
 
   <aside class="side">
+    <section class="panel">
+      <h2>Riya's phone</h2>
+      <div class="phone-card" id="phoneCard"><div id="phone"><div class="muted">When an agent asks for a binding action, Riya's approval request appears here.</div></div></div>
+    </section>
     <section class="panel">
       <h2>Waiting for a person</h2>
       <div id="tickets"><div class="muted">No handoffs. Disputes, sensitive requests and runaway agents land here.</div></div>
@@ -278,6 +317,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
     <section class="panel">
       <h2>Clinic appointments</h2>
       <table><thead><tr><th>Id</th><th>Patient</th><th>Slot</th><th>Status</th></tr></thead><tbody id="apts"></tbody></table>
+      <p class="last-write" id="lastWrite"></p>
     </section>
   </aside>
 </main>
@@ -285,7 +325,7 @@ tr.flash td { animation: flash 1.6s ease-out; }
 <script>
 const CHECKS = [
   ["identity", "Identity", "ID"], ["protocol", "Protocol", "{ }"], ["security", "Security", "⛨"],
-  ["delegation", "Delegation", "₹"], ["escalation", "Escalation", "⇄"], ["data_guard", "Data guard", "◐"],
+  ["delegation", "Delegation", "₹"], ["step_up", "Step-up", ""], ["escalation", "Escalation", "⇄"], ["data_guard", "Data guard", "◐"],
   ["audit", "Audit", "#"],
 ];
 const ICON = {
@@ -293,6 +333,7 @@ const ICON = {
   protocol: '<path d="M8 4c-2 0-2.5 1-2.5 3v2c0 1.5-.8 2.5-2 3 1.2.5 2 1.5 2 3v2c0 2 .5 3 2.5 3M16 4c2 0 2.5 1 2.5 3v2c0 1.5.8 2.5 2 3-1.2.5-2 1.5-2 3v2c0 2-.5 3-2.5 3"/>',
   security: '<path d="M12 3l7.5 3v5.5c0 4.5-3.2 8.2-7.5 9.5-4.3-1.3-7.5-5-7.5-9.5V6z"/><path d="M9 12l2.2 2.2L15.5 10"/>',
   delegation: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2.5 2.5M14 9l2 2"/>',
+  step_up: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M10.5 18.5h3M9.5 10.5l2 2 3.5-3.5"/>',
   escalation: '<circle cx="12" cy="7.5" r="3.5"/><path d="M5 20c.8-3.8 3.6-6 7-6s6.2 2.2 7 6"/>',
   data_guard: '<path d="M3 12s3.5-6 9-6c1.6 0 3 .5 4.2 1.2M21 12s-3.5 6-9 6c-1.6 0-3-.5-4.2-1.2"/><path d="M9.5 14.5a3.5 3.5 0 015-5M4 20L20 4"/>',
   audit: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
@@ -300,8 +341,9 @@ const ICON = {
 const svg = (k) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON[k]}</svg>`;
 const OUTCOME = {
   completed: "Completed", rejected: "Business said no", denied: "Refused at the gate", escalated: "Handed to a person",
-  needs_structure: "Asked to use structure", error: "Error",
+  needs_structure: "Asked to use structure", step_up_required: "Waiting for the customer", error: "Error",
 };
+const TIER = { open: "Open: anyone may ask", account: "Account: needs a verified delegation", binding: "Binding: needs the customer's own approval", human: "Human: a person decides" };
 const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -331,13 +373,15 @@ function layoutTrack() {
 // ---------- state ----------
 const decisions = [];
 let selected = null;
+let current = null;
+const liveIds = new Set();
 const queue = [];
 let playing = false;
 
+const N = pillars.length;  // the last pillar is audit, which runs for every request
 function tokenLeftFor(index) {
-  // index: -1 caller, 0..6 pillars, 7 business
-  const cols = track.children;
-  const target = index < 0 ? $("endCaller") : index >= 7 ? $("endBiz") : pillars[index];
+  // index: -1 caller, 0..N-1 pillars, N business
+  const target = index < 0 ? $("endCaller") : index >= N ? $("endBiz") : pillars[index];
   const t = target.getBoundingClientRect(), tr = track.getBoundingClientRect();
   return (t.left - tr.left) + t.width / 2;
 }
@@ -351,18 +395,26 @@ function stopIndex(d) {
 async function showDecision(d, animate) {
   selected = d.request_id;
   $("gateEmpty").hidden = true; $("gateBody").hidden = false;
+  current = d;
   const a = d.agent;
-  $("gCaller").innerHTML = a
-    ? `${esc(a.name)}<small>acting for ${esc(a.principal.name)}${d.intent ? `, asking for <b>${esc(d.intent.replaceAll("_", " "))}</b>` : ""}</small>`
-    : `Unverified caller<small>${d.intent ? `asking for <b>${esc(d.intent.replaceAll("_", " "))}</b>` : "no intent"}</small>`;
+  const asking = d.intent ? `asking to <b>${esc(d.intent.replaceAll("_", " "))}</b>` : "with free text";
+  const who = a && a.verified ? `${esc(a.name)}<small>acting for ${esc(a.principal.name)}, ${asking}</small>`
+    : a ? `${esc(a.name)}<small>no passport, ${asking}</small>`
+    : `Unverified caller<small>${asking}</small>`;
+  $("gCaller").innerHTML = who + (d.tier ? `<span class="tier ${d.tier}">${esc(TIER[d.tier])}</span>` : "");
   const oc = $("gOutcome"); oc.className = `outcome ${d.outcome}`; oc.textContent = OUTCOME[d.outcome] || d.outcome;
   $("gReply").textContent = d.reply;
+  const ao = d.agent_outcome || {};
+  const steps = [...(ao.next_steps || [])];
+  $("gNext").innerHTML = steps.map((x) => `<li>${esc(x)}</li>`).join("");
+  $("gCustomer").textContent = d.customer_message || "Nothing to relay.";
+  $("gCustomerBox").classList.toggle("empty-msg", !d.customer_message);
   $("gChecks").innerHTML = CHECKS.map(([k, name]) => {
     const c = d.checks.find((x) => x.name === k) || { status: "skip", detail: "Not reached." };
     return `<li class="${c.status}"><span class="k">${esc(name)}</span><span>${esc(c.detail)}</span></li>`;
   }).join("");
   const ex = [];
-  if (d.receipt) ex.push(`Signed receipt <span class="hash">${esc(d.receipt.slice(-22))}</span> <button class="btn quiet" type="button" data-copy="${esc(d.receipt)}">Copy receipt</button>`);
+  if (d.receipt) ex.push(`Signed receipt <span class="hash">${esc(d.receipt.slice(-22))}</span> <button class="btn quiet" type="button" data-relay="1">Check the relay</button> <button class="btn quiet" type="button" data-copy="${esc(d.receipt)}">Copy receipt</button>`);
   if (d.ticket_id) ex.push(`Ticket <b>${esc(d.ticket_id)}</b>`);
   if (d.audit_seq) ex.push(`Audit record #${d.audit_seq}`);
   ex.push(`${d.latency_ms < 1 ? "Under 1" : d.latency_ms} ms through the gate`);
@@ -375,13 +427,13 @@ async function showDecision(d, animate) {
   const token = $("token");
   token.className = "token";
   pillars.forEach((p) => (p.className = "pillar"));
-  $("endBiz").classList.toggle("dim", stop >= 0 && stop < 6);
+  $("endBiz").classList.toggle("dim", stop >= 0 && stop < N - 1);
 
   const reachedBiz = d.outcome === "completed" || d.outcome === "rejected";
   if (!animate || reduceMotion) {
     track.classList.add("instant");
     pillars.forEach((p) => p.classList.add("lit", statusOf(p.dataset.key)));
-    token.style.left = tokenLeftFor(stop >= 0 && stop < 6 ? stop : reachedBiz ? 7 : 6) + "px";
+    token.style.left = tokenLeftFor(stop >= 0 && stop < N - 1 ? stop : reachedBiz ? N : N - 1) + "px";
     if (stop >= 0) token.classList.add(statusOf(CHECKS[stop][0]) === "handoff" ? "handed" : "stopped");
     void track.offsetWidth; setTimeout(() => track.classList.remove("instant"), 60);
     return;
@@ -399,7 +451,7 @@ async function showDecision(d, animate) {
     pillars[i].classList.add("lit", st);
     if (i === stop) { token.classList.add(st === "handoff" ? "handed" : "stopped"); }
   }
-  if (stop < 0 || stop === 6) { if (reachedBiz) { await sleep(120); token.style.left = tokenLeftFor(7) + "px"; } }
+  if (stop < 0 || stop === N - 1) { if (reachedBiz) { await sleep(120); token.style.left = tokenLeftFor(N) + "px"; } }
   await sleep(500);
 }
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -417,7 +469,7 @@ function renderRows() {
   rows.innerHTML = decisions.slice().reverse().slice(0, 40).map((d) => {
     const t = new Date(d.ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
     const dots = CHECKS.map(([k]) => `<i class="${(d.checks.find((x) => x.name === k) || {}).status || "skip"}"></i>`).join("");
-    const who = d.agent ? d.agent.name : "Unverified caller";
+    const who = d.agent ? d.agent.name : "Unverified caller";  // anonymous callers carry their own label
     return `<button type="button" class="row ${d.request_id === selected ? "sel" : ""}" data-id="${esc(d.request_id)}">
       <span class="when">${t}</span>
       <span class="what"><b>${esc(who)}</b> ${esc(d.intent ? d.intent.replaceAll("_", " ") : "free text")}</span>
@@ -430,6 +482,12 @@ $("rows").addEventListener("click", (e) => {
   const d = decisions.find((x) => x.request_id === b.dataset.id); if (d) showDecision(d, true);
 });
 $("gExtras").addEventListener("click", async (e) => {
+  const r = e.target.closest("[data-relay]");
+  if (r && current) {
+    const v = await api("/api/receipts/verify", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ receipt: current.receipt, message: current.customer_message }) });
+    r.textContent = v.valid && v.message_matches ? "Receipt matches what the customer heard" : "Doesn't match";
+    return;
+  }
   const b = e.target.closest("[data-copy]"); if (!b) return;
   try { await navigator.clipboard.writeText(b.dataset.copy); b.textContent = "Copied"; } catch { b.textContent = "Copy failed"; }
 });
@@ -441,6 +499,7 @@ async function loadTickets() {
     <div class="ticket ${t.status}">
       <div class="top"><span class="id">${esc(t.id)}</span><span class="who">${esc(t.agent_name)} for ${esc(t.principal.name)}</span></div>
       <p>${esc(t.reason)}</p>
+      <p class="due">Answer due ${esc(fmtWhen(t.expected_by))}. ${t.customer_joined_at ? "Customer joined with their code." : `Join code <b>${esc(t.join_code)}</b>.`}</p>
       ${t.status === "open" ? `<button class="btn" type="button" data-resolve="${esc(t.id)}">Mark resolved</button>` : `<span class="muted">Resolved: ${esc(t.resolution)}</span>`}
     </div>`).join("") : '<div class="muted">No handoffs. Disputes, sensitive requests and runaway agents land here.</div>';
 }
@@ -458,17 +517,20 @@ async function loadAudit() {
   else { st.className = "chain-state bad"; st.innerHTML = `Broken at record #${verify.broken_at}<small>${esc(verify.reason)}</small>`; }
   $("links").innerHTML = records.slice().reverse().map((r) => {
     const d = r.data || {};
-    const label = r.event === "agent_request" ? `${d.outcome || ""} ${d.intent ? d.intent.replaceAll("_", " ") : ""}` : r.event.replaceAll("_", " ");
+    const label = r.event === "agent_request" ? `${(d.outcome || "").replaceAll("_", " ")} ${d.intent ? d.intent.replaceAll("_", " ") : ""}` : r.event.replaceAll("_", " ");
     return `<li class="${!verify.ok && r.seq === verify.broken_at ? "broken" : ""}"><span class="n">#${r.seq}</span><span>${esc(label)}</span><span class="hash">${esc((r.hash || "").slice(0, 8))}</span></li>`;
   }).join("") || '<li class="muted">Empty.</li>';
 }
 $("verifyBtn").onclick = loadAudit;
 $("tamperBtn").onclick = async () => { await api("/api/demo/tamper", { method: "POST" }); loadAudit(); };
 
+const fmtWhen = (ts) => new Date(ts * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" });
 let lastApts = {};
 const fmtSlot = (iso) => { const d = new Date(iso + ":00"); return isNaN(d) ? iso : d.toLocaleDateString([], { day: "numeric", month: "short" }) + ", " + iso.slice(11, 16); };
 async function loadClinic() {
-  const { appointments } = await api("/api/clinic");
+  const { appointments, changes } = await api("/api/clinic");
+  const last = (changes || [])[changes.length - 1];
+  $("lastWrite").textContent = last ? `Last change: ${last.action.replaceAll("_", " ")} by ${last.actor} (${last.channel === "agent" ? "AI agent" : "staff"}), through the same service the front desk uses.` : "AI agents and staff both change bookings through the same service.";
   $("apts").innerHTML = appointments.map((a) => {
     const sig = a.slot + a.status + a.copay_refunded;
     const changed = lastApts[a.id] && lastApts[a.id] !== sig;
@@ -499,10 +561,10 @@ async function runScenario(id) {
     res.textContent = r.as_expected ? "As designed" : "Unexpected";
   } catch (err) { res.className = "res bad"; res.textContent = "Failed"; console.error(err); }
   btn.classList.remove("running");
-  await Promise.all([loadTickets(), loadAudit(), loadClinic()]);
+  await Promise.all([loadTickets(), loadAudit(), loadClinic(), loadPhone()]);
   while (playing || queue.length) await sleep(150);
 }
-function setBusy(v) { busy = v; document.querySelectorAll(".scn, #runAll, #resetBtn").forEach((b) => (b.disabled = v)); }
+function setBusy(v) { busy = v; document.querySelectorAll(".scn, #runAll, #resetBtn, #liveBtn").forEach((b) => (b.disabled = v)); }
 $("scenarios").addEventListener("click", async (e) => {
   const b = e.target.closest(".scn"); if (!b || busy) return;
   setBusy(true); await runScenario(b.dataset.id); setBusy(false);
@@ -512,8 +574,57 @@ $("runAll").onclick = async () => {
   for (const s of scenarioList) await runScenario(s.id);
   setBusy(false);
 };
+// ---------- Riya's phone ----------
+async function loadPhone() {
+  const { challenges, methods } = await api("/api/stepup");
+  const pending = challenges.filter((c) => c.status === "pending");
+  const done = challenges.filter((c) => c.status !== "pending").slice(0, 2);
+  const label = { approved: "Approved", used: "Approved and used", declined: "Declined", expired: "Expired" };
+  const short = { app_biometric: "the app", sms_code: "SMS code", keypad_pin: "keypad PIN", voice_liveness: "voiceprint" };
+  const pend = pending.map((c) => `
+    <div class="req" data-cid="${esc(c.id)}">
+      <div class="from">${esc(c.agent_name)} is asking</div>
+      <div class="ask">Approve: ${esc(c.summary)}?</div>
+      <div class="meter" aria-label="Approval strength ${c.strength} of ${c.required_strength}"><i style="width:${Math.min(100, (100 * c.strength) / c.required_strength)}%"></i></div>
+      <div class="methods">${methods.map((m) => `<button class="btn" type="button" data-approve="${esc(m.id)}"${c.factors.includes(m.id) ? " disabled" : ""}><span>${esc(m.label)}</span><b>+${m.strength}</b></button>`).join("")}
+        <button class="btn quiet" type="button" data-decline="1">Decline</button></div>
+      <p class="note" id="note-${esc(c.id)}">Needs strength ${c.required_strength}. A voiceprint counts for 1 at most.</p>
+    </div>`).join("");
+  const hist = done.map((c) => `<div class="req done"><div class="from">${esc(label[c.status] || c.status)}${c.factors.length ? ` with ${esc(c.factors.map((f) => short[f] || f).join(" + "))}` : ""}</div><div class="ask">${esc(c.summary)}</div></div>`).join("");
+  $("phone").innerHTML = pend + hist || '<div class="muted">When an agent asks for a binding action, Riya\'s approval request appears here.</div>';
+  if (pending.length) { const card = $("phoneCard"); card.classList.remove("ringing"); void card.offsetWidth; card.classList.add("ringing"); }
+}
+$("phone").addEventListener("click", async (e) => {
+  const req = e.target.closest(".req"); if (!req) return;
+  const cid = req.dataset.cid;
+  const ap = e.target.closest("[data-approve]"); const dec = e.target.closest("[data-decline]");
+  if (!ap && !dec) return;
+  e.target.closest("button").disabled = true;
+  if (dec) { await api(`/api/stepup/${cid}/decline`, { method: "POST" }); liveIds.delete(cid); loadPhone(); return; }
+  const r = await api(`/api/stepup/${cid}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ methods: [ap.dataset.approve] }) });
+  if (r.challenge.status === "approved" && liveIds.has(cid)) {
+    liveIds.delete(cid);
+    await api(`/api/live/${cid}/resume`, { method: "POST" });
+    loadClinic(); loadAudit();
+  } else if (r.challenge.status === "pending") {
+    await loadPhone();
+    const note = $(`note-${cid}`); if (note) note.textContent = r.message;
+    return;
+  }
+  loadPhone();
+});
+$("liveBtn").onclick = async () => {
+  if (busy) return; setBusy(true);
+  try {
+    const r = await api("/api/live/start", { method: "POST" });
+    if (r.challenge_id) liveIds.add(r.challenge_id);
+    await loadPhone();
+  } finally { setBusy(false); }
+};
+
 $("resetBtn").onclick = async () => {
   await api("/api/demo/reset", { method: "POST" });
+  liveIds.clear(); loadPhone();
   decisions.length = 0; queue.length = 0; selected = null; lastApts = {};
   $("gateBody").hidden = true; $("gateEmpty").hidden = false;
   document.querySelectorAll(".res").forEach((r) => (r.textContent = ""));
@@ -525,7 +636,12 @@ function connect() {
   const es = new EventSource("/api/events");
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
-    if (ev.type === "decision") { decisions.push(ev.decision); renderRows(); queue.push(ev.decision); pump(); }
+    if (ev.type === "decision") {
+      decisions.push(ev.decision); renderRows(); queue.push(ev.decision); pump();
+      if (ev.decision.outcome === "step_up_required" || ev.decision.tier === "binding") loadPhone();
+      if (ev.decision.outcome === "completed") loadClinic();
+    }
+    else if (ev.type === "step_up") loadPhone();
     else if (ev.type === "ticket") loadTickets();
     else if (ev.type === "audit") loadAudit();
   };
@@ -542,7 +658,7 @@ async function loadInfo() {
 }
 
 (async function init() {
-  await Promise.all([loadInfo(), loadScenarios(), loadTickets(), loadAudit(), loadClinic()]);
+  await Promise.all([loadInfo(), loadScenarios(), loadTickets(), loadAudit(), loadClinic(), loadPhone()]);
   const { decisions: past } = await api("/api/decisions");
   decisions.push(...past); renderRows();
   if (past.length) showDecision(past[past.length - 1], false);

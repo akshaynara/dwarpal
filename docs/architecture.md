@@ -1,29 +1,51 @@
 # Dwarpal architecture
 
+## Principle: gate the action, not the caller
+
+Telling humans from agents, or good agents from bad ones, is probabilistic. Good and bad agents make the same requests (a claim status check can be routine or the first step of fraud), and some AI voices are people speaking for themselves. So Dwarpal never grants anything based on a guess about the caller. Each action declares the proof it needs, and that proof is checked the same way whoever asks:
+
+| Tier | Proof | Clinic examples |
+|---|---|---|
+| open | none | `clinic_info`, `list_slots` |
+| account | verified passport with the right scope | `appointment_status`, `reschedule_appointment` |
+| binding | passport + the customer's own approval of this exact action | `cancel_appointment`, `refund_copay` |
+| human | a person decides | `billing_dispute`, `medical_records` |
+
+Signals about the caller (for example an AI-voice detection score or carrier attestation, on the voice roadmap) may add friction. They never unlock an action. A wrong guess therefore costs a little friction and nothing more, because the action still needs its proof.
+
 ## Threat model
 
-Dwarpal protects a business AI agent (the *callee*) from AI agents acting for customers (*callers*). Callers may be:
+Callers may be:
 
 - **Legitimate but over-reaching**: a real assistant asking for more than its user delegated
-- **Compromised**: a valid, verified agent that has been prompt-injected upstream and now carries hostile instructions
+- **Compromised**: a verified agent carrying hostile instructions from upstream
 - **Impersonators**: agents claiming to act for someone they don't
 - **Replayers**: anyone who captured a valid request in transit
-- **Runaway**: two agents stuck in a loop, or an agent pushing a contested matter until something gives
+- **Runaway**: agents stuck in a loop, or pushing a contested matter until something gives
+- **Pretenders**: agents that won't say they're agents
 
-What Dwarpal does not try to do is decide contested matters between agents. Disputes have competing interests and no agreed process, so two agents arguing only burns compute. Those go to a person, with full context.
+Dwarpal does not decide contested matters between agents. Disputes have competing interests and no agreed process, so two agents arguing only burns compute. Those go to a person at once.
 
 ## Request lifecycle
 
 ```
-caller ──A2A──► parse ─► identity ─► limits ─► protocol ─► security ─► delegation ─► human-only? ─┐
-                                                                                                   │
-                         audit + receipt ◄── data guard ◄── business agent (ADK) ◄──── no ─────────┤
-                                                                         human queue ◄──── yes ────┘
+caller ──A2A──► identity ─► limits ─► protocol ─► security ─► delegation ─► tier?
+                                                                             │
+          human ◄────────────────────────────────────────────────────────────┤
+          (ticket, due time, join code)                                      │
+                                                                             ▼
+          binding ──► step-up: approved for this exact action? ──no──► step_up_required
+                                    │ yes
+                                    ▼
+          open/account ──► business agent (ADK) ──► business service (shared with staff)
+                                    │
+                                    ▼
+                    data guard ─► agent outcome + customer message ─► receipt ─► audit
 ```
 
-Each stage appends a `Check(name, status, detail)`. The first `fail` or `handoff` ends the pipeline. Every request, refused or not, is written to the audit chain, so the record of what was *attempted* is as complete as the record of what was done.
+Each stage appends a `Check(name, status, detail)`. The first `fail` or `handoff` ends the pipeline. Every request, refused or not, goes into the audit chain, so the record of what was *attempted* is as complete as the record of what was done.
 
-### 1. Identity: passport + proof
+### Identity: passport + proof
 
 **Agent passport** (compact JWS, `typ: agent-passport+jwt`, EdDSA), issued by an identity provider the business trusts:
 
@@ -41,47 +63,59 @@ Each stage appends a `Check(name, status, detail)`. The first `fail` or `handoff
 }
 ```
 
-`ai_disclosed` is required. Disclosure is the foundation, so a caller that won't say it's an AI isn't served.
+Disclosure is part of the credential (`ai_disclosed`), not good manners: a passport that doesn't declare an AI isn't accepted.
 
-**Request proof** (`typ: agent-proof+jwt`) signed by the key in `cnf` for every request: `aud`, `iat`, a random `nonce`, and `bh`, the SHA-256 of the canonical request body. The gateway checks the key matches the passport, the proof is under 60 seconds old, the nonce is unseen and the body hash matches. This is the same idea as OAuth DPoP: a passport alone is not enough, and a captured request can't be replayed or edited.
+**Request proof** (`typ: agent-proof+jwt`) signed by the key in `cnf` for every request: `aud`, `iat`, a random `nonce`, and `bh`, the SHA-256 of the canonical request body (including any step-up id). The gateway checks the key matches the passport, the proof is under 60 seconds old, the nonce is unseen and the body hash matches. Same idea as OAuth DPoP.
 
-### 2. Limits
+Open-tier requests may come without a passport. If a passport *is* presented it must verify; a bad credential is never silently downgraded to anonymous.
 
-Per agent and A2A context: requests per minute, turns per session, a compute budget (one unit per model call), repeated identical requests (loops) and repeated refusals (probing). A breach locks the session and opens a human ticket. Later requests get the ticket id back instead of reaching the business agent.
+### Limits
 
-### 3. Protocol
+Per agent and A2A context: requests per minute (anonymous callers share one bucket), turns per session, a compute budget (one unit per model call), repeated identical requests (loops) and repeated refusals (probing). A breach locks the session and opens a human ticket.
 
-Agents must send a structured intent from the policy catalog. A free-text-only request gets the catalog back (`needs_structure`), which is the agent equivalent of *press 1 for appointments*, and costs nothing. Parameters not whitelisted for the intent are stripped. The optional `note` is length-limited and is never forwarded.
+### Protocol and security
 
-### 4. Security
+Structured intents from the policy catalog only. Free text gets the catalog back (open intents only, for anonymous callers). Non-whitelisted parameters are stripped. The shield scans every caller-controlled string, including stripped parameters, through normalised rules, then Gemini, then Model Armor. The bigger control is architectural: the business agent only receives the gateway's *verified task*, never the caller's words.
 
-The shield scans every caller-controlled string, including stripped parameters, since an attempt is worth flagging even if it would have been discarded:
+### Delegation
 
-1. **Rules**: NFKC normalisation, zero-width characters removed, base64 segments decoded and re-scanned. Attack families are instruction override, role hijack, system-prompt exfiltration, delimiter injection, authority claims, tool coercion, data exfiltration, social engineering and exfiltration channels. Independent signals compound: `score = 1 − Π(1 − wᵢ)`.
-2. **Gemini classifier**: catches paraphrases the rules miss (Gemini mode).
-3. **Model Armor**: Google Cloud's managed prompt-injection and jailbreak filter.
+The passport must grant the intent's scope. For money, the effective cap is the lower of the passport's and the policy's limit. This runs **before** step-up, so customers are never asked to approve something that would be refused anyway.
 
-The more important control is architectural: the business agent only ever receives the gateway's *verified task*. Even an attack that evaded every layer has no free-text channel into the agent's context.
+### Step-up (binding tier)
 
-### 5. Delegation
+Modelled on OpenID CIBA: the agent asks, the customer approves on their own device.
 
-The required scope comes from policy, and the passport must grant it (`appointments:*` wildcards supported). For money intents, the effective cap is the lower of the passport's `max_amount_inr` and the policy's `max_amount_inr`. Object-level authorization, meaning whether *this* appointment belongs to *this* principal, happens inside the business tools, using the principal from ADK session state set by the gateway, never from the request. "Not found" and "not yours" return the same answer.
+1. The gateway creates a challenge whose `action_hash` covers the principal, agent, intent and parameters, and returns `step_up_required` with the challenge id, a customer message to relay and `retry_after_seconds`.
+2. The customer completes one or more methods. Each has a strength in policy (`app_biometric` 2, `sms_code` 1, `keypad_pin` 1, `voice_liveness` 1). The challenge is approved once the total reaches `required_strength` (2).
+3. The agent resends the identical request with the challenge id. The gateway checks it is approved, unexpired, unused and that the action hash matches, then consumes it.
 
-### 6. Escalation to a person
+Rules that hold whatever the policy file says:
 
-Intents marked `mode: human` in policy (disputes, clinical records) always open a ticket. A second push for the same intent in the same session returns the existing ticket rather than opening another.
+- **A voiceprint is capped at strength 1 in code.** A clean 8–12 second sample is enough to clone a voice, so a voice can never approve a binding action alone.
+- **An approval covers one exact action.** Using it for a different action, amount, appointment or agent is refused (`step_up_mismatch`).
+- **Approvals are single-use and expire** (300 seconds by default).
+- **There is always a path that needs no speech** (app, SMS, keypad), so people who can't or don't speak aren't shut out.
 
-### 7. Data guard
+### Human handoff
 
-Every outbound response has `never_disclose_fields` removed at any depth, and `redact_patterns` (phone numbers, email, Aadhaar) applied to all strings.
+Human-tier intents, and sessions that hit a limit, open a ticket with the recent history, a due time (`response_hours` per intent, shorter for runaway sessions) and a one-time **join code**. The calling agent gets the case id, `expected_by` and a `retry_after_seconds` that runs until then, so it stops calling. A second push for the same intent returns the same ticket. The customer can join the case with the code without re-verifying, so they never have to start the story over.
 
-### 8. Audit and receipts
+### No privileged path
 
-Each record holds `seq, ts, event, data, prev` and gets `hash = sha256(canonical(record))` plus `sig = Ed25519(hash)` from the gateway key. Verification walks the chain and reports the first record whose link, content or signature fails. Editing, deleting, reordering or re-hashing without the key are all detected (see `tests/test_audit_and_guard.py`).
+`ClinicService` holds every business rule: ownership checks ("not found" and "not yours" give the same answer), slot availability, refund ceilings, and "clinical records only to staff". The ADK agent's tools are thin wrappers over it with `Actor(channel="agent")`; the staff desk endpoint calls it with `Actor(channel="staff")`. Every write is recorded with its channel and appended to the audit chain. The gateway module has no reference to the service (a test enforces this).
 
-For completed actions the caller receives a receipt (`typ: dwarpal-receipt+jwt`) containing the request hash, result hash, intent, principal and the audit chain head at that moment, so both sides hold the same evidence.
+### Two messages
+
+- **Agent outcome**: `decision`, `reason_codes`, `next_steps`, `retry_after_seconds`, `expected_by`, `relay_customer_message`.
+- **Customer message**: rendered from the policy's `customer_messages` templates, looked up as `<outcome>.<intent>`, then `<outcome>.<reason>`, then `<outcome>`, and passed through the data guard. Security refusals use a neutral template.
+
+### Audit and receipts
+
+Each record holds `seq, ts, event, data, prev` and gets `hash = sha256(canonical(record))` plus `sig = Ed25519(hash)` from the gateway key. Events include every decision, every step-up factor, declines, business writes, customer joins and human resolutions. Verification reports the first record whose link, content or signature fails.
+
+For completed actions by verified agents, the receipt (`typ: dwarpal-receipt+jwt`) contains the request hash, result hash, tier, intent, principal, step-up evidence, the audit chain head, and `customer_message_sha256`. `POST /api/receipts/verify` checks a receipt and, optionally, whether a relayed message matches what the business said.
 
 ## Why ADK and A2A
 
-- **A2A** gives a standard way for any caller agent to discover the gateway (agent card with skills and the `agentPassport` security scheme) and talk to it, whatever framework the caller was built with.
-- **ADK** runs the business agent with tools and session state. The gateway passes the verified principal through session state, which keeps authorization out of the prompt. The same backend interface can forward to an agent deployed separately on Vertex AI Agent Engine over A2A.
+- **A2A** gives any caller agent a standard way to discover the gateway (agent card with each action's tier and the `agentPassport` scheme) and talk to it, whatever framework it was built with.
+- **ADK** runs the business agent with tools and session state. The verified principal and caller travel in session state, which keeps authorisation out of the prompt. The same backend interface can forward to an agent deployed separately on Vertex AI Agent Engine.

@@ -28,16 +28,18 @@ class BusinessTask:
     session_id: str
     agent_id: str
     agent_name: str
-    principal_id: str
+    principal_id: str          # "" for anonymous open-tier callers
     principal_name: str
     intent: str
     params: dict[str, Any]
+    tier: str = "account"
 
     def render(self) -> str:
         return (
             "DWARPAL VERIFIED TASK\n"
             f"caller_agent: {self.agent_name} ({self.agent_id})\n"
-            f"acting_for: {self.principal_name} ({self.principal_id})\n"
+            f"acting_for: {self.principal_name} ({self.principal_id or 'none'})\n"
+            f"tier: {self.tier}\n"
             f"intent: {self.intent}\n"
             f"params: {json.dumps(self.params, ensure_ascii=False)}\n"
         )
@@ -88,7 +90,8 @@ class ADKBackend:
         user = task.agent_id
         if sid not in self._known:
             await self.sessions.create_session(app_name=self.APP, user_id=user, session_id=sid,
-                                               state={"principal_id": task.principal_id})
+                                               state={"principal_id": task.principal_id,
+                                                      "caller_agent_id": task.agent_id})
             self._known.add(sid)
         result = BusinessResult(message="")
         texts: list[str] = []
