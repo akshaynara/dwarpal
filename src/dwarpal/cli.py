@@ -140,8 +140,10 @@ async def _doctor(live: bool) -> int:
             started = time.monotonic()
             # One attempt, so Google's own error shows instead of silent retries running out the clock.
             client = genai.Client(http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1)))
+            from .llm import fast_config
+
             reply = await asyncio.wait_for(client.aio.models.generate_content(
-                model=s.model, contents="Reply with the word OK."), s.llm_timeout)
+                model=s.model, contents="Reply with the word OK.", config=fast_config(s.model)), s.llm_timeout)
             add("PASS", "Gemini call",
                 f"{s.model} replied in {time.monotonic() - started:.1f}s: {(reply.text or '').strip()[:40]}")
         except TimeoutError:

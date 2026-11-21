@@ -129,6 +129,7 @@ Demo mode trusts the demo identities and opens the dashboard. **Production mode*
 | `DWARPAL_IDP_KEY` | unset | Your identity provider's key for step-up callbacks |
 | `DWARPAL_CHANNEL_KEY` | generated | Your voice platform's key for `/voice/turn` |
 | `DWARPAL_LLM_MODE` / `DWARPAL_MODEL` | `auto` / `gemini-flash-latest` | Gemini when credentials exist, else scripted |
+| `DWARPAL_THINKING` | `low` | How long Gemini thinks; `low` keeps replies fast |
 | `DWARPAL_LLM_TIMEOUT` | `20` | Seconds to wait for Gemini before the scripted fallback answers |
 | `DWARPAL_BUSINESSES` | `clinic,payor` | Which businesses to mount |
 | `DWARPAL_POLICY` | built-in | Your policy file for the default business |

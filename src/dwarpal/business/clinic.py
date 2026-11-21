@@ -10,6 +10,7 @@ from __future__ import annotations
 from google.adk.agents import LlmAgent
 from google.adk.tools import ToolContext
 
+from ..llm import fast_config
 from .scripted import ScriptedModel
 from .service import Actor, ClinicService
 
@@ -84,4 +85,5 @@ def build_clinic_agent(service: ClinicService, *, use_gemini: bool, model: str) 
                                                                "cancel_appointment": {"reason": ""}}),
         instruction=INSTRUCTION,
         tools=build_tools(service),
+        generate_content_config=fast_config(model) if use_gemini else None,
     )

@@ -12,6 +12,23 @@ from .config import Settings
 log = logging.getLogger("dwarpal.llm")
 
 
+def fast_config(model: str, **kw: Any):
+    """Generation config that keeps Gemini's thinking short: front-desk lookups don't need deep reasoning,
+    and thinking is most of the wait. DWARPAL_THINKING=default leaves the model's own setting."""
+    import os
+
+    from google.genai import types
+
+    level = os.getenv("DWARPAL_THINKING", "low").lower()
+    thinking = None
+    if level != "default":
+        if model.startswith("gemini-2"):
+            thinking = types.ThinkingConfig(thinking_budget=0 if level in {"low", "minimal"} else -1)
+        elif model.startswith("gemini-") and "latest" not in model:
+            thinking = types.ThinkingConfig(thinking_level=level.upper())
+    return types.GenerateContentConfig(thinking_config=thinking, **kw)
+
+
 class GeminiJudge:
     """Asks Gemini for a small JSON verdict. Returns None on any failure, so callers fall back."""
 
@@ -42,12 +59,8 @@ class GeminiJudge:
             call = self._client.aio.models.generate_content(
                 model=self.settings.model,
                 contents=prompt,
-                config=types.GenerateContentConfig(
-                    system_instruction=system,
-                    response_mime_type="application/json",
-                    temperature=0.0,
-                    max_output_tokens=300,
-                ),
+                config=fast_config(self.settings.model, system_instruction=system,
+                                   response_mime_type="application/json", temperature=0.0),
             )
             resp = await asyncio.wait_for(call, min(self.settings.llm_timeout, 10))
             return json.loads(resp.text or "{}")

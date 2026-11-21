@@ -11,6 +11,7 @@ from google.adk.agents import LlmAgent
 from google.adk.tools import ToolContext
 
 from .payor import Caller, PayorService
+from ..llm import fast_config
 from .scripted import ScriptedModel
 
 
@@ -62,4 +63,5 @@ def build_payor_agent(service: PayorService, *, use_gemini: bool, model: str) ->
                                                                "eligibility": {"service_type": "30"}}),
         instruction=INSTRUCTION,
         tools=build_tools(service),
+        generate_content_config=fast_config(model) if use_gemini else None,
     )
