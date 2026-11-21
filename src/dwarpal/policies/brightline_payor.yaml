@@ -76,6 +76,10 @@ voice:
   lane_code_ttl_seconds: 600
   drop_fields: [audio, recording_url, transcript, utterance_audio]
 
+# Pilot metrics. Used only to estimate phone time avoided by requests the agent lane completed.
+metrics:
+  avg_call_minutes: 15   # a provider call to check a prior auth, hold time included
+
 limits:
   max_turns_per_session: 12           # provider agents often check several auths in one session
   max_cost_units_per_session: 30

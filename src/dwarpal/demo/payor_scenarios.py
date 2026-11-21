@@ -18,6 +18,15 @@ async def pa_fhir(st: Stage, tag: str):
     return [("Sunrise's RCM agent checks PA-90001 (Medicare Advantage)", r)]
 
 
+async def pa_fhir_down(st: Stage, tag: str):
+    st.service.fhir_down = True  # the payor's FHIR PA API goes down
+    try:
+        r = await st.callers["sunrise"].send(intent="pa_status", params=ASHA, session=new_session("pa"), tag=tag)
+    finally:
+        st.service.fhir_down = False
+    return [("The FHIR PA API returns 503; the same request falls through to the plan's X12 278 rail", r)]
+
+
 async def pa_x12(st: Stage, tag: str):
     r = await st.callers["sunrise"].send(intent="pa_status", params=ROHAN, session=new_session("pa"), tag=tag)
     return [("Same question for PA-90002, on a commercial plan with no FHIR API", r)]
@@ -82,6 +91,10 @@ PAYOR_SCENARIOS: list[Scenario] = [
              "Sunrise's RCM agent asks about an MRI auth on a Medicare Advantage plan. The answer comes back "
              "through the plan's FHIR PA API, with the member's diagnosis stripped.",
              "data_guard", ["completed"], pa_fhir),
+    Scenario("pa_fhir_down", "FHIR API down: the next rail answers",
+             "The Medicare Advantage plan's FHIR PA API returns 503. The plan's next rail, X12 278, answers the "
+             "same request, and the trace shows both attempts.",
+             "data_guard", ["completed"], pa_fhir_down),
     Scenario("pa_x12", "Same question, a plan without FHIR",
              "A commercial plan isn't covered by the FHIR mandate. The same request is answered over X12 278, "
              "including what the payor still needs.",

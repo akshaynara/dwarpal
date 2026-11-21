@@ -58,9 +58,20 @@ class Challenge:
 
 
 class StepUpService:
-    def __init__(self, policy: StepUpPolicy):
+    COLL = "step_ups"
+
+    def __init__(self, policy: StepUpPolicy, store: Any = None):
         self.policy = policy
+        self.store = store
         self.challenges: dict[str, Challenge] = {}
+        if store is not None:
+            for d in store.all(self.COLL):
+                c = Challenge(**d)
+                self.challenges[c.id] = c
+
+    def _save(self, c: Challenge) -> None:
+        if self.store is not None:
+            self.store.put(self.COLL, c.id, c.to_dict())
 
     def method_strength(self, method_id: str) -> int:
         m = self.policy.methods.get(method_id)
@@ -82,12 +93,15 @@ class StepUpService:
         for old in self.challenges.values():
             if old.status == "pending" and old.agent_id == agent_id and old.action_hash == c.action_hash:
                 old.status = "superseded"
+                self._save(old)
         self.challenges[c.id] = c
+        self._save(c)
         return c
 
     def _expire(self, c: Challenge, now: float) -> None:
         if c.status in {"pending", "approved"} and now > c.expires_at:
             c.status = "expired"
+            self._save(c)
 
     def approve(self, challenge_id: str, methods: list[str], now: float | None = None) -> tuple[Challenge, str]:
         """Record the factors the patient completed. Returns the challenge and a plain-language result."""
@@ -104,7 +118,9 @@ class StepUpService:
         c.strength = sum(self.method_strength(m) for m in c.factors)
         if c.strength >= c.required_strength:
             c.status, c.approved_at = "approved", now
+            self._save(c)
             return c, "Approved."
+        self._save(c)
         missing = c.required_strength - c.strength
         return c, (f"Not enough on its own: strength {c.strength} of {c.required_strength}. "
                    f"Add another factor worth {missing}, such as an SMS code or the keypad PIN.")
@@ -113,6 +129,7 @@ class StepUpService:
         c = self.challenges[challenge_id]
         if c.status == "pending":
             c.status = "declined"
+            self._save(c)
         return c
 
     def check(self, challenge_id: str, *, principal_id: str, agent_id: str, intent: str,
@@ -136,11 +153,13 @@ class StepUpService:
         for c in self.challenges.values():
             if c.agent_id == agent_id and c.status == "pending":
                 c.status = "superseded"
+                self._save(c)
                 ids.append(c.id)
         return ids
 
     def consume(self, c: Challenge, request_id: str) -> None:
         c.status, c.used_by = "used", request_id
+        self._save(c)
 
     def list(self) -> list[dict[str, Any]]:
         now = time.time()
@@ -154,3 +173,5 @@ class StepUpService:
 
     def clear(self) -> None:
         self.challenges.clear()
+        if self.store is not None:
+            self.store.clear(self.COLL)

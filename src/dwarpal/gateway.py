@@ -75,6 +75,8 @@ class InboundRequest:
     lane_code: str | None = None  # links an A2A session to the phone call that offered the code
     channel: str = "a2a"  # a2a | voice
     voice: VoiceContext | None = None
+    http_sig: dict[str, Any] | None = None  # RFC 9421 result from the HTTP middleware, if the request was signed
+    extensions: list[str] = field(default_factory=list)  # A2A extensions the caller activated
     tag: str | None = None  # e.g. demo scenario name
 
     @property
@@ -280,7 +282,12 @@ class Gateway:
         elif req.passport:
             try:
                 agent = self.verifier.verify_passport(req.passport)
-                self.verifier.verify_proof(agent, req.proof, req.signed_body)
+                if req.http_sig is not None:
+                    self.verifier.verify_http_signature(agent, req.http_sig, req.passport)
+                    how = "request signed with RFC 9421 HTTP Message Signatures by the bound key, nonce fresh"
+                else:
+                    self.verifier.verify_proof(agent, req.proof, req.signed_body)
+                    how = "request proof signed by the bound key, nonce fresh"
             except IdentityError as e:
                 checks.append(Check("identity", "fail", f"{e.message} [{e.code}]"))
                 return done("denied", f"Identity check failed: {e.message} This attempt has been logged.",
@@ -291,7 +298,7 @@ class Gateway:
                              "principal": asdict(agent.principal), "scopes": agent.scopes, "limits": agent.limits,
                              "verified": True, "channel": "a2a"})
             detail = (f"AI agent “{agent.agent_name}” acting for {agent.principal.name} ({agent.principal.id}), "
-                      f"passport from {agent.issuer}; request signed by the bound key, nonce fresh.")
+                      f"passport from {agent.issuer}; {how}.")
             if req.lane_code:
                 res, lane = self.lanes.redeem(req.lane_code, principal_id=agent.principal.id, agent_id=agent.agent_id)
                 if res != "ok" or lane is None:
@@ -306,6 +313,8 @@ class Gateway:
                              "withdrew_phone_approvals": withdrawn}
                 detail += (f" Continued from phone call {lane.call_id} with a lane code: the code links the "
                            "context, the passport grants.")
+            if any("extension-agent-passport" in e for e in req.extensions):
+                detail += " Caller activated the Dwarpal agent-passport A2A extension."
             checks.append(Check("identity", "pass", detail))
         elif rule is None or rule.tier == "open":
             checks.append(Check("identity", "warn",

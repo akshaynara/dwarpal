@@ -174,3 +174,18 @@ async def test_waiting_for_approval_is_not_a_loop(app):
         rt.approve(ask.challenge_id, ["app_biometric"])
         done = await riya.send(intent="cancel_appointment", params=params, session="poll", step_up=ask.challenge_id)
     assert done.outcome == "completed"
+
+
+async def test_metrics_come_from_the_audit_chain(app):
+    for sid in ("reschedule", "injection", "dispute", "stepup"):
+        await run(app, sid)
+    async with client(app) as http:
+        m = (await http.get("/api/metrics")).json()
+        health = (await http.get("/healthz")).json()
+    assert m["requests"] == 2 + 2 + 2 + 2
+    assert m["injection_blocked"] == 2 and m["attacks_stopped"] >= 2
+    assert m["handed_to_person"] == 1 and m["repeats_absorbed"] == 1
+    assert m["step_ups_asked"] == 1 and m["step_ups_approved"] == 1
+    assert m["phone_minutes_avoided"] == m["avg_call_minutes"] * 3  # 2 reschedule steps + 1 cancel, all A2A
+    assert sum(o["count"] for o in m["outcomes"]) == m["requests"]
+    assert health["ok"] and health["businesses"]["clinic"] is True

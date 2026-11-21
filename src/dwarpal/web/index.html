@@ -26,6 +26,8 @@
   --handoff-soft: #DEDAF1;
   --skip: #B8C0BD;
   --line: #C9D0C8;
+  /* Outcome bar: the validated reference categorical palette, slots 1-6 in fixed order */
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100; --s5: #e87ba4; --s6: #008300;
   --display: "Bricolage Grotesque", "Avenir Next", "Segoe UI", system-ui, sans-serif;
   --body: "Atkinson Hyperlegible", "Segoe UI", system-ui, sans-serif;
   --deva: "Tiro Devanagari Hindi", "Noto Serif Devanagari", "Mangal", serif;
@@ -191,6 +193,23 @@ h2 { font: 700 18px/1.2 var(--display); margin: 0 0 12px; letter-spacing: -0.005
 .btn.live:hover { border-color: var(--ink); }
 .ticket .due { font-size: 13.5px; color: var(--ink-2); margin: 0 0 8px; }
 .last-write { font-size: 13.5px; color: var(--ink-2); margin: 10px 0 0; }
+.metrics { margin-top: 22px; }
+.kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+@media (max-width: 820px) { .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+.kpi { background: var(--stone); border-radius: 10px; padding: 12px 14px; }
+.kpi .v { font: 700 28px/1.1 var(--display); letter-spacing: -0.01em; }
+.kpi .l { font-size: 14px; font-weight: 700; margin-top: 4px; }
+.kpi .s { font-size: 13px; color: var(--ink-2); margin-top: 2px; }
+.sub-h { font: 700 15px/1.2 var(--body); margin: 18px 0 8px; }
+.segbar { display: flex; gap: 2px; height: 28px; }
+.segbar .seg { border-radius: 4px; display: flex; align-items: center; padding-left: 8px; font-size: 13px; font-weight: 700; min-width: 2px; overflow: hidden; white-space: nowrap; }
+.segbar .seg:focus-visible { outline-offset: 1px; }
+.seglegend { list-style: none; display: flex; flex-wrap: wrap; gap: 6px 16px; padding: 0; margin: 10px 0 0; font-size: 13.5px; color: var(--ink-2); }
+.seglegend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+.mline { font-size: 14px; color: var(--ink-2); margin: 12px 0 0; }
+details.tv { margin-top: 10px; font-size: 14px; }
+details.tv summary { cursor: pointer; color: var(--ink-2); font-weight: 700; }
+details.tv td.n { text-align: right; font-variant-numeric: tabular-nums; }
 .lane-head { font: 700 14px/1.2 var(--body); color: var(--ink-2); margin: 16px 12px 4px; }
 .lane-head:first-child { margin-top: 4px; }
 .signals { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
@@ -303,6 +322,16 @@ tr.flash td { animation: flash 1.6s ease-out; }
       </div>
     </div>
 
+    <div class="panel metrics">
+      <h2>What the gate has done</h2>
+      <div class="kpis" id="kpis"></div>
+      <h3 class="sub-h">How requests ended</h3>
+      <div class="segbar" id="segbar" role="group" aria-label="How requests ended"></div>
+      <ul class="seglegend" id="seglegend"></ul>
+      <p class="mline" id="mline"></p>
+      <details class="tv"><summary>Table view</summary><table id="mtable"></table></details>
+    </div>
+
     <div class="panel timeline">
       <h2>Every request, newest first</h2>
       <div class="rows" id="rows"><div class="muted">Nothing has reached the gate yet.</div></div>
@@ -363,7 +392,30 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 // Each business is mounted under its own prefix ("" for the clinic, "/payor" for the payor).
 const BASE = location.pathname.replace(/\/+$/, "");
-const api = async (path, opts) => { const r = await fetch(BASE + path, opts); if (!r.ok) throw new Error(`${path}: ${r.status}`); return r.json(); };
+// Admin token (production): from a "#token=..." link or asked once; kept only for this browser session.
+let TOKEN = "";
+try {
+  const m = location.hash.match(/token=([^&]+)/);
+  if (m) { TOKEN = decodeURIComponent(m[1]); sessionStorage.setItem("dwarpal_token", TOKEN); history.replaceState(null, "", location.pathname + location.search); }
+  else TOKEN = sessionStorage.getItem("dwarpal_token") || "";
+} catch { /* storage unavailable: the token lives in memory only */ }
+let askedForToken = false;
+const api = async (path, opts = {}) => {
+  const used = TOKEN;
+  const headers = { ...(opts.headers || {}) };
+  if (used) headers.Authorization = `Bearer ${used}`;
+  const r = await fetch(BASE + path, { ...opts, headers });
+  if (r.status === 401) {
+    if (TOKEN !== used) return api(path, opts);
+    if (!askedForToken) {
+      askedForToken = true;
+      const t = window.prompt("This Dwarpal needs its admin token.");
+      if (t) { TOKEN = t.trim(); try { sessionStorage.setItem("dwarpal_token", TOKEN); } catch {} return api(path, opts); }
+    }
+  }
+  if (!r.ok) throw new Error(`${path}: ${r.status}`);
+  return r.json();
+};
 
 // ---------- pillars ----------
 const track = $("track");
@@ -447,6 +499,8 @@ async function showDecision(d, animate) {
   if (d.agent_lane) ex.push(`Lane code <b>${esc(d.agent_lane.code)}</b> offered`);
   const rail = d.data && d.data.rail;
   if (rail) ex.push(rail === "human" ? "No electronic rail: a person answers" : `Answered via <b>${esc(d.data.rail_label || rail)}</b>`);
+  const trace = (d.data && d.data.rail_trace) || [];
+  if (trace.length > 1) ex.push(`Rail trace: ${esc(trace.join(" → "))}`);
   if (d.continued_from_call) ex.push(`Continued from phone call ${esc(d.continued_from_call.call_id)}`);
   if (d.audit_seq) ex.push(`Audit record #${d.audit_seq}`);
   ex.push(`${d.latency_ms < 1 ? "Under 1" : d.latency_ms} ms through the gate`);
@@ -612,6 +666,38 @@ $("runAll").onclick = async () => {
   for (const s of scenarioList) await runScenario(s.id);
   setBusy(false);
 };
+// ---------- metrics ----------
+const SEG = { completed: ["var(--s1)", "#fff"], step_up_required: ["var(--s2)", "#fff"], escalated: ["var(--s3)", "#1D2B2F"],
+  rejected: ["var(--s4)", "#1D2B2F"], denied: ["var(--s5)", "#1D2B2F"], needs_structure: ["var(--s6)", "#fff"] };
+const pct = (x) => `${Math.round(x * 100)}%`;
+let metricsTimer = null;
+function queueMetrics() { clearTimeout(metricsTimer); metricsTimer = setTimeout(loadMetrics, 400); }
+async function loadMetrics() {
+  const m = await api("/api/metrics");
+  const tile = (v, l, s) => `<div class="kpi"><div class="v">${esc(v)}</div><div class="l">${esc(l)}</div><div class="s">${esc(s)}</div></div>`;
+  $("kpis").innerHTML = [
+    tile(m.requests, "Requests", m.requests ? `${pct(m.agent_share)} from AI agents` : "None yet"),
+    tile(m.requests ? pct(m.completed_share) : "–", "Completed automatically", `${m.completed} of ${m.requests}`),
+    tile(m.attacks_stopped, "Attacks stopped", `${m.injection_blocked} prompt injection${m.injection_blocked === 1 ? "" : "s"}, the rest forged or replayed`),
+    tile(`${m.step_ups_approved} of ${m.step_ups_asked}`, "Customer approvals", "Binding actions and flagged calls"),
+    tile(m.handed_to_person, "Handed to a person", `${m.repeats_absorbed} repeat push${m.repeats_absorbed === 1 ? "" : "es"} absorbed`),
+    tile(`~${m.phone_minutes_avoided} min`, "Phone time avoided", `Estimate: agent-lane completions × ${m.avg_call_minutes} min`),
+  ].join("");
+  const total = m.outcomes.reduce((a, o) => a + o.count, 0);
+  $("segbar").innerHTML = m.outcomes.map((o) => {
+    const share = total ? o.count / total : 0;
+    const [bg, fg] = SEG[o.key] || ["var(--skip)", "#1D2B2F"];
+    const label = `${o.label}: ${o.count} (${pct(share)})`;
+    return `<div class="seg" tabindex="0" title="${esc(label)}" aria-label="${esc(label)}" style="flex:${o.count} 0 0;background:${bg};color:${fg}">${share >= 0.09 ? pct(share) : ""}</div>`;
+  }).join("") || '<div class="muted">No requests yet.</div>';
+  $("seglegend").innerHTML = m.outcomes.map((o) => `<li><i style="background:${(SEG[o.key] || ["var(--skip)"])[0]}"></i>${esc(o.label)}</li>`).join("");
+  const r = m.rails || {};
+  const railText = Object.keys(r).length ? ` Rails used: ${Object.entries(r).map(([k, v]) => `${({ fhir_pas: "FHIR", x12_278: "X12 278", x12_270: "X12 270/271", human: "a person" })[k] || k} ${v}`).join(", ")}.` : "";
+  $("mline").textContent = `${m.channels.a2a} over A2A and ${m.channels.phone} on the phone. ${m.lane_offers} phone caller${m.lane_offers === 1 ? " was" : "s were"} offered the agent lane and ${m.lane_switches} switched.${railText} Every number comes from the ${m.signed_records} signed audit records.`;
+  $("mtable").innerHTML = "<thead><tr><th>Outcome</th><th>Requests</th><th>Share</th></tr></thead><tbody>" +
+    m.outcomes.map((o) => `<tr><td>${esc(o.label)}</td><td class="n">${o.count}</td><td class="n">${total ? pct(o.count / total) : "0%"}</td></tr>`).join("") + "</tbody>";
+}
+
 // ---------- Riya's phone ----------
 async function loadPhone() {
   const { challenges, methods } = await api("/api/stepup");
@@ -662,7 +748,7 @@ $("liveBtn").onclick = async () => {
 
 $("resetBtn").onclick = async () => {
   await api("/api/demo/reset", { method: "POST" });
-  liveIds.clear(); loadPhone();
+  liveIds.clear(); loadPhone(); loadMetrics();
   decisions.length = 0; queue.length = 0; selected = null; lastApts = {};
   $("gateBody").hidden = true; $("gateEmpty").hidden = false;
   document.querySelectorAll(".res").forEach((r) => (r.textContent = ""));
@@ -671,13 +757,14 @@ $("resetBtn").onclick = async () => {
 
 // ---------- live events ----------
 function connect() {
-  const es = new EventSource(BASE + "/api/events");
+  const es = new EventSource(BASE + "/api/events" + (TOKEN ? `?access_token=${encodeURIComponent(TOKEN)}` : ""));
   es.onmessage = (m) => {
     const ev = JSON.parse(m.data);
     if (ev.type === "decision") {
       decisions.push(ev.decision); renderRows(); queue.push(ev.decision); pump();
       if (ev.decision.outcome === "step_up_required" || ev.decision.tier === "binding") loadPhone();
       if (ev.decision.outcome === "completed") loadClinic();
+      queueMetrics();
     }
     else if (ev.type === "step_up") loadPhone();
     else if (ev.type === "ticket") loadTickets();
@@ -706,7 +793,7 @@ async function loadInfo() {
 }
 
 (async function init() {
-  await Promise.all([loadInfo(), loadScenarios(), loadTickets(), loadAudit(), loadClinic(), loadPhone()]);
+  await Promise.all([loadInfo(), loadScenarios(), loadTickets(), loadAudit(), loadClinic(), loadPhone(), loadMetrics()]);
   const { decisions: past } = await api("/api/decisions");
   decisions.push(...past); renderRows();
   if (past.length) showDecision(past[past.length - 1], false);

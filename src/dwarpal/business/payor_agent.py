@@ -28,9 +28,9 @@ def build_tools(service: PayorService) -> list:
         """Provider-services hours, prior-auth fax, or how to submit. topic: hours | fax | portal."""
         return service.plan_contacts(_caller(tool_context), topic)
 
-    def pa_status(auth_number: str, member_id: str, member_dob: str, tool_context: ToolContext) -> dict:
+    async def pa_status(auth_number: str, member_id: str, member_dob: str, tool_context: ToolContext) -> dict:
         """Status of a prior authorisation this provider requested. The member's id and date of birth must match."""
-        return service.pa_status(_caller(tool_context), auth_number, member_id, member_dob)
+        return await service.pa_status(_caller(tool_context), auth_number, member_id, member_dob)
 
     def eligibility(member_id: str, member_dob: str, service_type: str, tool_context: ToolContext) -> dict:
         """Eligibility and benefits for a member (X12 service type code, e.g. 30 for general benefits)."""

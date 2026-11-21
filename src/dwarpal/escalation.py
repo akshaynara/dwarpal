@@ -44,8 +44,19 @@ class Ticket:
 
 
 class EscalationQueue:
-    def __init__(self) -> None:
+    COLL = "tickets"
+
+    def __init__(self, store: Any = None) -> None:
+        self.store = store
         self.tickets: dict[str, Ticket] = {}
+        if store is not None:
+            for d in store.all(self.COLL):
+                t = Ticket(**d)
+                self.tickets[t.id] = t
+
+    def _save(self, t: Ticket) -> None:
+        if self.store is not None:
+            self.store.put(self.COLL, t.id, t.to_dict())
 
     def open(self, *, response_hours: float, join_ttl_hours: float, **kwargs: Any) -> Ticket:
         now = time.time()
@@ -54,6 +65,7 @@ class EscalationQueue:
             join_code="".join(secrets.choice(JOIN_ALPHABET) for _ in range(6)),
             join_code_expires=now + join_ttl_hours * 3600, **kwargs)
         self.tickets[ticket.id] = ticket
+        self._save(ticket)
         return ticket
 
     def join(self, code: str, now: float | None = None) -> tuple[str, Ticket | None]:
@@ -68,12 +80,14 @@ class EscalationQueue:
         if now > t.join_code_expires:
             return "expired", t
         t.customer_joined_at = now
+        self._save(t)
         return "ok", t
 
     def resolve(self, ticket_id: str, resolution: str) -> Ticket | None:
         t = self.tickets.get(ticket_id)
         if t:
             t.status, t.resolution, t.resolved_at = "resolved", resolution, time.time()
+            self._save(t)
         return t
 
     def list(self) -> list[dict[str, Any]]:
@@ -81,3 +95,5 @@ class EscalationQueue:
 
     def clear(self) -> None:
         self.tickets.clear()
+        if self.store is not None:
+            self.store.clear(self.COLL)

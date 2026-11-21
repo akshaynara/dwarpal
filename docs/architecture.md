@@ -134,6 +134,18 @@ Everything business-specific is plugged in as a kit (`businesses.py`): the polic
 
 The business service can also decide that a person must answer (`status: needs_human`), for example a payor plan with no electronic rail. The gateway then opens a ticket with the service's due time and handles repeats exactly as for human-tier actions. See [The payor desk](payor-desk.md).
 
+## Request signing (RFC 9421)
+
+Callers sign the HTTP request with HTTP Message Signatures, covering `@method`, `@authority`, `@path`, `content-digest` (RFC 9530), `content-type` and `authorization` (which carries the passport), with `created`, `nonce`, `keyid`, `alg="ed25519"` and `tag="dwarpal-agent"`. An ASGI middleware verifies the signature and digest at the HTTP layer, using the key the passport binds, and passes the result to the gateway in an internal header that is stripped from every incoming request. The gateway then verifies the passport itself, checks that the signature was made under this same passport and its bound key, and enforces the nonce. Because the digest covers the whole JSON-RPC body, the envelope, step-up id and lane code are all integrity-protected. The older JWS request proof remains as a fallback for clients that can't sign HTTP requests. The profile is published as an A2A extension: [extension-agent-passport.md](extension-agent-passport.md).
+
+## State and production mode
+
+Tickets, step-up challenges, lane codes and seen nonces persist in SQLite (`store.py`), so a restart neither loses a customer's case nor reopens the replay window. Session counters are deliberately in memory. In production mode only issuers with a public key in the policy are trusted, demo endpoints are off, the dashboard and admin API need a bearer token, and step-up results are accepted only from the identity provider's key. See [deploy.md](deploy.md).
+
+## Metrics
+
+`/api/metrics` computes pilot metrics from the audit chain itself: agent share, outcomes, attacks stopped, injections blocked, step-ups asked and approved, handoffs, repeats absorbed, lane offers and switches, rails used, and phone time avoided (agent-lane completions × the policy's `avg_call_minutes`, labelled as an estimate).
+
 ## Why ADK and A2A
 
 - **A2A** gives any caller agent a standard way to discover the gateway (agent card with each action's tier and the `agentPassport` scheme) and talk to it, whatever framework it was built with.

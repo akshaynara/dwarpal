@@ -17,7 +17,7 @@ import httpx
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.routes import add_a2a_routes_to_fastapi, create_agent_card_routes, create_jsonrpc_routes
 from a2a.server.tasks import InMemoryTaskStore
-from fastapi import APIRouter, FastAPI, Header, HTTPException
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, StreamingResponse
 from pydantic import BaseModel
 
@@ -33,11 +33,13 @@ from .escalation import EscalationQueue
 from .events import EventBus
 from .gateway import Gateway
 from .guard import SessionGuard
-from .identity import IdentityVerifier, KeyPair, TrustStore
+from .identity import IdentityVerifier, KeyPair, TrustStore, public_key_from_b64
 from .llm import GeminiJudge
 from .messages import message_hash
 from .policy import TIER_LABELS, Policy
 from .shield import ModelArmorClient, Shield
+from .httpsig import HttpSignatureMiddleware
+from .store import Store
 from .stepup import StepUpService
 from .voice import LaneService, VoiceContext, sanitise
 
@@ -92,8 +94,14 @@ def build_runtime(settings: Settings | None = None, kit: BusinessKit = CLINIC) -
     policy = Policy.load(policy_path)
 
     trust = TrustStore()
+    # Issuers with a public key in the policy file are always trusted. Demo issuers only in demo mode.
+    for iss in policy.trusted_issuers:
+        if iss.get("public_key"):
+            trust.add(iss["id"], public_key_from_b64(iss["public_key"]), label=iss.get("label", ""))
     world = kit.build_world(data_dir, policy.business_id)
-    world.trust(trust)
+    if not settings.production:
+        world.trust(trust)
+    store = Store(data_dir / "state.db") if settings.state == "sqlite" else None
 
     gateway_key = KeyPair.load_or_create(data_dir / "gateway.pem")
     judge = GeminiJudge(settings)
@@ -108,17 +116,19 @@ def build_runtime(settings: Settings | None = None, kit: BusinessKit = CLINIC) -
     event = getattr(service, "audit_event", "business_write")
     service.on_write = lambda change: audit.append(event, **change)
 
+    verifier = IdentityVerifier(trust, policy.business_id)
+    verifier.nonces.store = store
     gateway = Gateway(
         policy=policy,
-        verifier=IdentityVerifier(trust, policy.business_id),
+        verifier=verifier,
         shield=Shield(judge=judge, model_armor=armor),
         guard=SessionGuard(policy.limits),
-        escalations=EscalationQueue(),
-        stepup=StepUpService(policy.step_up),
+        escalations=EscalationQueue(store),
+        stepup=StepUpService(policy.step_up, store),
         audit=audit,
         backend=ADKBackend(agent, fallback),
         events=EventBus(),
-        lanes=LaneService(policy.voice),
+        lanes=LaneService(policy.voice, store),
     )
     key_file = data_dir / "channel.key"
     channel_key = os.getenv("DWARPAL_CHANNEL_KEY") or (key_file.read_text().strip() if key_file.exists() else "")
@@ -184,13 +194,22 @@ class DeskActionBody(BaseModel):
 
 def create_app(settings: Settings | None = None, businesses: list[str] | None = None) -> FastAPI:
     settings = settings or Settings()
+    settings.check()
     slugs = businesses or [b.strip() for b in os.getenv("DWARPAL_BUSINESSES", "clinic,payor").split(",") if b.strip()]
     app = FastAPI(title="Dwarpal", version=__version__,
                   description="Gate the action, not the caller: a policy and enforcement layer for AI agents "
                               "calling a business, on the phone or over A2A (Google ADK).")
+    app.add_middleware(HttpSignatureMiddleware)  # RFC 9421 checks on every */a2a endpoint
+    if settings.admin_token:
+        app.add_middleware(AdminAuthMiddleware, token=settings.admin_token)
     runtimes = {slug: build_runtime(settings, KITS[slug]) for slug in slugs}
     app.state.runtimes = runtimes
     app.state.runtime = runtimes.get("clinic") or next(iter(runtimes.values()))
+
+    @app.get("/healthz", include_in_schema=False)
+    async def healthz():
+        return {"ok": True, "version": __version__,
+                "businesses": {slug: rt.gateway.audit.verify()["ok"] for slug, rt in runtimes.items()}}
     for rt in runtimes.values():
         mount(app, rt, runtimes)
     return app
@@ -278,6 +297,14 @@ def mount(app: FastAPI, rt: Runtime, runtimes: dict[str, Runtime]) -> None:
         return StreamingResponse(stream(), media_type="text/event-stream",
                                  headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
+    @router.get("/api/metrics")
+    async def metrics():
+        """Pilot metrics, computed from the signed audit chain."""
+        from .metrics import compute
+
+        return compute(gw.audit.records(), avg_call_minutes=float(
+            (rt.policy.raw.get("metrics") or {}).get("avg_call_minutes", 6)))
+
     @router.get("/api/book")
     async def book():
         """The business's own records, for the dashboard."""
@@ -337,15 +364,26 @@ def mount(app: FastAPI, rt: Runtime, runtimes: dict[str, Runtime]) -> None:
         return {"challenges": gw.stepup.list(), "methods": gw.stepup.methods_public(),
                 "required_strength": rt.policy.step_up.required_strength}
 
+    def _approval_allowed(request: Request) -> None:
+        """Approvals come from the customer's identity provider (its key), or from the demo phone card."""
+        idp = request.headers.get("x-dwarpal-idp-key", "")
+        if s.idp_key and hmac.compare_digest(idp, s.idp_key):
+            return
+        if s.enable_demo_endpoints and (not s.admin_token or _bearer_ok(request, s.admin_token)):
+            return
+        raise HTTPException(401, "Approvals must come from the customer's identity provider.")
+
     @router.post("/api/stepup/{challenge_id}/approve")
-    async def stepup_approve(challenge_id: str, body: ApproveBody):
+    async def stepup_approve(challenge_id: str, body: ApproveBody, request: Request):
+        _approval_allowed(request)
         try:
             return rt.approve(challenge_id, body.methods)
         except KeyError:
             raise HTTPException(404, "No such approval request") from None
 
     @router.post("/api/stepup/{challenge_id}/decline")
-    async def stepup_decline(challenge_id: str):
+    async def stepup_decline(challenge_id: str, request: Request):
+        _approval_allowed(request)
         try:
             return rt.decline(challenge_id)
         except KeyError:
@@ -462,6 +500,8 @@ def mount(app: FastAPI, rt: Runtime, runtimes: dict[str, Runtime]) -> None:
         gw.escalations.clear()
         gw.stepup.clear()
         gw.lanes.clear()
+        if gw.verifier.nonces.store is not None:
+            gw.verifier.nonces.store.clear_nonces()
         gw.guard.sessions.clear()
         gw.guard._rate.clear()
         gw.history.clear()
@@ -476,11 +516,42 @@ def mount(app: FastAPI, rt: Runtime, runtimes: dict[str, Runtime]) -> None:
         return resources.files("dwarpal.web").joinpath("index.html").read_text(encoding="utf-8")
 
     app.include_router(router)
+    if kit.on_mount:
+        kit.on_mount(app, rt)
+
+
+def _bearer_ok(request: Any, token: str) -> bool:
+    auth = request.headers.get("authorization", "")
+    got = auth[7:] if auth.lower().startswith("bearer ") else request.query_params.get("access_token", "")
+    return bool(got) and hmac.compare_digest(got, token)
+
+
+class AdminAuthMiddleware:
+    """Protects the dashboard API with a bearer token (or ?access_token= for the event stream). The A2A and
+    voice endpoints have their own authentication; join codes and receipt checks stay public; step-up
+    callbacks are checked by the endpoint itself."""
+    OPEN = ("/api/join/", "/api/receipts/verify", "/api/stepup/")
+
+    def __init__(self, app: Any, token: str):
+        self.app, self.token = app, token
+
+    async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
+        path = scope.get("path", "")
+        if scope["type"] == "http" and "/api/" in path and not any(o in path for o in self.OPEN):
+            from starlette.requests import Request as _Req
+
+            if not _bearer_ok(_Req(scope), self.token):
+                body = b'{"detail":"Admin token required."}'
+                await send({"type": "http.response.start", "status": 401,
+                            "headers": [(b"content-type", b"application/json"), (b"www-authenticate", b"Bearer")]})
+                await send({"type": "http.response.body", "body": body})
+                return
+        await self.app(scope, receive, send)
 
 
 def stage_for(rt: Runtime, http: httpx.AsyncClient) -> sc.Stage:
     """Everything a demo scenario needs to act out a business's story, all through real endpoints."""
     base_url = rt.settings.public_url.rstrip("/") + rt.kit.prefix
-    return sc.Stage(callers=rt.world.callers(http, base_url), approve=rt.approve, join=rt.join,
+    return sc.Stage(callers=rt.world.callers(http, base_url), approve=rt.approve, join=rt.join, service=rt.service,
                     ivr=sc.IVR(http, rt.channel_key, rt.kit.ivr_verify(rt.service),
                                path=f"{rt.kit.prefix}/voice/turn"))

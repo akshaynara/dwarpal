@@ -23,7 +23,8 @@ def cmd_serve(args: argparse.Namespace) -> None:
     os.environ.setdefault("DWARPAL_PUBLIC_URL", f"http://localhost:{args.port}")
     from .app import create_app
 
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
+    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info",
+                proxy_headers=True, forwarded_allow_ips="*")  # behind Cloud Run / a load balancer
 
 
 async def _demo(only: list[str] | None, verbose: bool, businesses: list[str] | None) -> int:
@@ -71,6 +72,147 @@ def cmd_demo(args: argparse.Namespace) -> None:
     sys.exit(asyncio.run(_demo(args.only, args.verbose, args.business)))
 
 
+def cmd_pas(args: argparse.Namespace) -> None:
+    """Run the bundled PAS-style FHIR server on its own, so the payor's FHIR rail calls it over the network."""
+    import uvicorn
+    from fastapi import FastAPI
+
+    from .business.payor import PayorService
+    from .fhir.pas_server import pas_router
+
+    svc = PayorService()
+    token = args.token or os.getenv("DWARPAL_PAYOR_FHIR_TOKEN") or "dev-token"
+    app = FastAPI(title="Brightline PAS test server")
+    app.include_router(pas_router(lambda: svc.data, token=token, is_down=lambda: False))
+    print(f"PAS test server on http://{args.host}:{args.port}  (bearer token: {token})")
+    print(f"Point Dwarpal at it: DWARPAL_PAYOR_FHIR_URL=http://{args.host}:{args.port} "
+          f"DWARPAL_PAYOR_FHIR_TOKEN={token} dwarpal serve")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+async def _doctor(live: bool) -> int:
+    """Check this installation end to end and say plainly what works."""
+    import platform
+
+    import httpx
+
+    from . import __version__
+    from .app import create_app, stage_for
+    from .demo import scenarios as sc
+
+    results: list[tuple[str, str, str]] = []
+
+    def add(status: str, name: str, detail: str) -> None:
+        results.append((status, name, detail))
+
+    add("PASS" if sys.version_info >= (3, 11) else "FAIL", "Python", platform.python_version())
+    add("PASS", "Dwarpal", __version__)
+    try:
+        app = create_app()
+    except Exception as exc:  # noqa: BLE001
+        add("FAIL", "Startup", f"{type(exc).__name__}: {exc}")
+        return _report(results)
+    for rt in app.state.runtimes.values():
+        s = rt.settings
+        add("PASS", f"{rt.kit.slug}: policy", f"{rt.policy.business_name}, {len(rt.policy.intents)} actions")
+        add("PASS", f"{rt.kit.slug}: audit chain", "intact" if rt.gateway.audit.verify()["ok"] else "BROKEN")
+        issuers = [i.label or i.issuer for i in rt.trust.issuers()]
+        add("PASS" if issuers else "FAIL", f"{rt.kit.slug}: trusted issuers", ", ".join(issuers) or "none")
+    s = next(iter(app.state.runtimes.values())).settings
+    add("PASS", "Mode", f"{s.mode}; demo endpoints {'on' if s.enable_demo_endpoints else 'off'}; state {s.state}")
+    if s.production:
+        add("PASS" if s.idp_key else "WARN", "IdP callback key",
+            "set" if s.idp_key else "DWARPAL_IDP_KEY unset: nobody can approve step-ups in production")
+
+    mode = s.resolved_llm_mode
+    add("PASS", "LLM mode", f"{mode}" + (f" ({s.model})" if mode == "gemini" else
+                                         ": offline scripted model. Set GOOGLE_API_KEY to use Gemini."))
+    if mode == "gemini":
+        try:
+            from google import genai
+
+            reply = await genai.Client().aio.models.generate_content(model=s.model, contents="Reply with the word OK.")
+            add("PASS", "Gemini call", f"{s.model} replied: {(reply.text or '').strip()[:40]}")
+        except Exception as exc:  # noqa: BLE001
+            add("FAIL", "Gemini call", f"{type(exc).__name__}: {str(exc)[:160]}")
+    if live:
+        rt = app.state.runtimes.get("clinic") or next(iter(app.state.runtimes.values()))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=s.public_url, timeout=120) as http:
+            sid = rt.kit.scenarios[0].id if rt.kit.slug != "clinic" else "reschedule"
+            res = await sc.run_scenario(sid, stage_for(rt, http), rt.kit.scenarios)
+        detail = " ".join(c["detail"] for st in res["steps"] for c in st["payload"].get("checks", [])
+                          if c["name"] == "data_guard")
+        fell_back = "scripted fallback" in detail
+        add("PASS" if res["as_expected"] and not fell_back else "FAIL" if not res["as_expected"] else "WARN",
+            "End-to-end scenario", f"{sid}: {res['outcomes']}" + (" (Gemini failed, scripted fallback answered)"
+                                                                   if fell_back else ""))
+    if os.getenv("DWARPAL_PAYOR_FHIR_URL"):
+        url = os.getenv("DWARPAL_PAYOR_FHIR_URL", "").rstrip("/") + "/metadata"
+        try:
+            async with httpx.AsyncClient(timeout=10) as http:
+                r = await http.get(url)
+            add("PASS" if r.status_code == 200 else "FAIL", "Payor FHIR endpoint", f"{url} → HTTP {r.status_code}")
+        except Exception as exc:  # noqa: BLE001
+            add("FAIL", "Payor FHIR endpoint", f"{url}: {type(exc).__name__}")
+    return _report(results)
+
+
+def _report(results: list[tuple[str, str, str]]) -> int:
+    colour = {"PASS": "32", "WARN": "33", "FAIL": "31"}
+    for status, name, detail in results:
+        print(f"  {_c(colour[status], status):>4}  {name}: {detail}")
+    bad = sum(1 for r in results if r[0] == "FAIL")
+    print(f"\n{'All good.' if not bad else f'{bad} problem(s) found.'}")
+    return 1 if bad else 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> None:
+    print(_c("1", "\nDwarpal doctor\n"))
+    sys.exit(asyncio.run(_doctor(not args.quick)))
+
+
+def cmd_keygen(args: argparse.Namespace) -> None:
+    """Create an Ed25519 key (for an issuer, or for an agent) and print its kid and public key."""
+    from pathlib import Path
+
+    from .identity import KeyPair
+
+    path = Path(args.out)
+    if path.exists():
+        sys.exit(f"{path} already exists; not overwriting it.")
+    kp = KeyPair.load_or_create(path)
+    print(f"private key: {path} (keep it secret)\nkid:         {kp.kid}\npublic_key:  {kp.public_b64}")
+    print("\nTo trust it as an issuer, add to the policy's trusted_issuers:\n"
+          f"  - id: <issuer id>\n    public_key: {kp.public_b64}")
+
+
+def cmd_issue(args: argparse.Namespace) -> None:
+    """Issue an agent passport (for a pilot, or when the business itself is the identity provider)."""
+    from pathlib import Path
+
+    from .identity import KeyPair, Principal, issue_passport
+
+    issuer = KeyPair.load_or_create(Path(args.issuer_key))
+
+    class _Agent:  # issue_passport needs only the agent's kid and public key
+        def __init__(self, pub_b64: str):
+            from .identity import b64u_decode
+            import hashlib
+
+            self.public_b64, self.kid = pub_b64, hashlib.sha256(b64u_decode(pub_b64)).hexdigest()[:16]
+
+    agent_pub = KeyPair.load_or_create(Path(args.agent_key)).public_b64 if args.agent_key else args.agent_pub
+    if not agent_pub:
+        sys.exit("Give --agent-key (a key file) or --agent-pub (its public key).")
+    token = issue_passport(
+        issuer, issuer=args.issuer, agent_key=_Agent(agent_pub), agent_id=args.agent_id,
+        agent_name=args.agent_name or args.agent_id,
+        principal=Principal(id=args.principal_id, name=args.principal_name or args.principal_id, type=args.principal_type),
+        audience=args.audience, scopes=[x.strip() for x in args.scopes.split(",") if x.strip()],
+        limits={"max_amount_inr": args.max_amount} if args.max_amount else {}, ttl_seconds=args.ttl)
+    print(token)
+
+
 def cmd_verify(args: argparse.Namespace) -> None:
     from .app import build_runtime
 
@@ -92,6 +234,33 @@ def main() -> None:
     d.add_argument("-v", "--verbose", action="store_true", help="Show every check, not just failures.")
     d.add_argument("--business", nargs="*", help="Businesses to run (clinic, payor). Default: all.")
     d.set_defaults(func=cmd_demo)
+    dr = sub.add_parser("doctor", help="Check the installation, Gemini and an end-to-end scenario.")
+    dr.add_argument("--quick", action="store_true", help="Skip the end-to-end scenario.")
+    dr.set_defaults(func=cmd_doctor)
+    k = sub.add_parser("keygen", help="Create an Ed25519 key for an issuer or an agent.")
+    k.add_argument("--out", required=True, help="Where to write the private key (PEM).")
+    k.set_defaults(func=cmd_keygen)
+    i = sub.add_parser("issue-passport", help="Issue an agent passport signed by an issuer key.")
+    i.add_argument("--issuer-key", required=True)
+    i.add_argument("--issuer", required=True, help="Issuer id, as listed in the policy's trusted_issuers.")
+    i.add_argument("--audience", required=True, help="The business id (policy business.id).")
+    i.add_argument("--agent-id", required=True)
+    i.add_argument("--agent-name")
+    g = i.add_mutually_exclusive_group()
+    g.add_argument("--agent-key", help="The agent's key file (PEM).")
+    g.add_argument("--agent-pub", help="The agent's public key (base64url).")
+    i.add_argument("--principal-id", required=True)
+    i.add_argument("--principal-name")
+    i.add_argument("--principal-type", default="person")
+    i.add_argument("--scopes", required=True, help="Comma-separated, e.g. appointments:read,appointments:write")
+    i.add_argument("--max-amount", type=float, default=None)
+    i.add_argument("--ttl", type=int, default=3600)
+    i.set_defaults(func=cmd_issue)
+    f = sub.add_parser("pas-server", help="Run the bundled PAS-style FHIR server on its own.")
+    f.add_argument("--host", default="127.0.0.1")
+    f.add_argument("--port", type=int, default=8090)
+    f.add_argument("--token", default=None)
+    f.set_defaults(func=cmd_pas)
     v = sub.add_parser("verify-audit", help="Verify the audit hash chain and signatures.")
     v.set_defaults(func=cmd_verify)
     args = p.parse_args()

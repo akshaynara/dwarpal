@@ -30,10 +30,23 @@ class Settings:
         default_factory=lambda: Path(p) if (p := os.getenv("DWARPAL_POLICY")) else None
     )
     public_url: str = field(default_factory=lambda: os.getenv("DWARPAL_PUBLIC_URL", "http://localhost:8080"))
-    enable_demo_endpoints: bool = field(
-        default_factory=lambda: os.getenv("DWARPAL_DEMO", "true").lower() != "false"
-    )
+    # demo: demo identities trusted, scenario/live/tamper endpoints on, dashboard open.
+    # production: only issuers from the policy file, demo endpoints off, admin token required.
+    mode: str = field(default_factory=lambda: os.getenv("DWARPAL_MODE", "demo").lower())
+    enable_demo_endpoints: bool = field(default_factory=lambda: _truthy(
+        os.getenv("DWARPAL_DEMO", "false" if os.getenv("DWARPAL_MODE", "demo").lower() == "production" else "true")))
+    admin_token: str | None = field(default_factory=lambda: os.getenv("DWARPAL_ADMIN_TOKEN") or None)
+    idp_key: str | None = field(default_factory=lambda: os.getenv("DWARPAL_IDP_KEY") or None)
+    state: str = field(default_factory=lambda: os.getenv("DWARPAL_STATE", "sqlite").lower())  # sqlite | memory
     model_armor_template: str | None = field(default_factory=lambda: os.getenv("DWARPAL_MODEL_ARMOR_TEMPLATE"))
+
+    @property
+    def production(self) -> bool:
+        return self.mode == "production"
+
+    def check(self) -> None:
+        if self.production and not self.admin_token:
+            raise RuntimeError("DWARPAL_MODE=production needs DWARPAL_ADMIN_TOKEN for the dashboard and admin API.")
 
     @property
     def resolved_llm_mode(self) -> str:

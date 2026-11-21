@@ -111,6 +111,10 @@ voice:
   # Never stored, even if the voice platform sends it. Scores only.
   drop_fields: [audio, recording_url, transcript, utterance_audio]
 
+# Pilot metrics. Used only to estimate phone time avoided by requests the agent lane completed.
+metrics:
+  avg_call_minutes: 6   # a front-desk call about an appointment
+
 # Guards against runaway or adversarial agent loops.
 limits:
   max_turns_per_session: 8            # requests per A2A context before a human takes over

@@ -8,6 +8,8 @@ agent card, voice endpoint, audit log and dashboard.
 
 from __future__ import annotations
 
+import os
+import secrets
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -34,6 +36,7 @@ class BusinessKit:
     ivr_verify: Callable[[Any], Callable[..., dict[str, str] | None]]
     scenarios: list[Scenario] = field(default_factory=list)
     live: bool = False  # has the "approve on stage" flow
+    on_mount: Callable[[Any, Any], None] | None = None  # extra wiring once the app exists
 
 
 def _clinic_verify(service: ClinicService):
@@ -56,6 +59,26 @@ def _payor_verify(service: PayorService):
     return verify
 
 
+def _payor_mount(app: Any, rt: Any) -> None:
+    """Connect the payor's FHIR rail: a real FHIR PA API if configured, otherwise the bundled PAS server."""
+    import httpx
+
+    from .fhir.pas_server import pas_router
+
+    svc = rt.service
+    real = os.getenv("DWARPAL_PAYOR_FHIR_URL")
+    if real:
+        svc.fhir_base, svc.fhir_token = real, os.getenv("DWARPAL_PAYOR_FHIR_TOKEN", "")
+        svc.fhir_client = lambda: httpx.AsyncClient()
+        return
+    token = os.getenv("DWARPAL_PAYOR_FHIR_TOKEN") or secrets.token_urlsafe(16)
+    app.include_router(pas_router(lambda: svc.data, token=token, is_down=lambda: svc.fhir_down),
+                       prefix=f"{rt.kit.prefix}/fhir")
+    svc.fhir_base = rt.settings.public_url.rstrip("/") + f"{rt.kit.prefix}/fhir"
+    svc.fhir_token = token
+    svc.fhir_client = lambda: httpx.AsyncClient(transport=httpx.ASGITransport(app=app))
+
+
 CLINIC = BusinessKit(
     slug="clinic", prefix="", policy_file="sunrise_clinic.yaml",
     build_service=lambda policy: ClinicService(),
@@ -72,6 +95,7 @@ PAYOR = BusinessKit(
     build_world=PayorWorld.load,
     ivr_verify=_payor_verify,
     scenarios=PAYOR_SCENARIOS,
+    on_mount=_payor_mount,
 )
 
 KITS: dict[str, BusinessKit] = {k.slug: k for k in (CLINIC, PAYOR)}

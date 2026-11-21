@@ -95,42 +95,61 @@ def _mask(name: str) -> str:
     return " ".join(p[0] + "." for p in name.split())
 
 
-# --------------------------------------------------------------------------- rails (simulated)
+# --------------------------------------------------------------------------- rails
 
 
-class FhirPasRail:
-    """HL7 Da Vinci PAS-style inquiry: a Claim $inquire request answered with a ClaimResponse."""
+class RailUnavailable(Exception):
+    """The rail couldn't answer (down, unauthorised, not offered for this member). Try the next one."""
+
+
+class FhirHttpRail:
+    """A real HTTP client for a Da Vinci PAS-style FHIR PA API: POST {base}/Claim/$inquire with a bearer token,
+    parse the ClaimResponse's reviewAction. In the demo it calls the bundled PAS server; set
+    DWARPAL_PAYOR_FHIR_URL / DWARPAL_PAYOR_FHIR_TOKEN to call a real one."""
     id = "fhir_pas"
     label = "FHIR PA API ($inquire)"
 
-    def inquire(self, auth: dict[str, Any], auth_number: str) -> dict[str, Any]:
-        request = {"resourceType": "Bundle", "type": "collection",
-                   "entry": [{"resource": {"resourceType": "Claim", "use": "preauthorization",
-                                           "identifier": [{"value": auth_number}]}}]}
-        response = {"resourceType": "ClaimResponse", "outcome": "complete" if auth["review"] != "A4" else "queued",
-                    "preAuthRef": auth_number,
-                    "item": [{"adjudication": [{"category": {"text": "reviewAction"},
-                                                "reason": {"coding": [{"code": auth["review"]}]}}]}]}
-        return {"request": request, "response": response, "summary":
-                f"Claim/$inquire for {auth_number} → ClaimResponse outcome {response['outcome']}, "
-                f"reviewAction {auth['review']}"}
+    async def inquire(self, service: "PayorService", *, auth_number: str, member_id: str, member_dob: str,
+                      npi: str, cpt: str) -> dict[str, Any]:
+        from ..fhir.pas_server import FHIR_JSON, build_inquiry, read_review_action
+
+        if service.fhir_client is None:
+            raise RailUnavailable("no FHIR endpoint configured")
+        bundle = build_inquiry(auth_number=auth_number, member_id=member_id, member_dob=member_dob, npi=npi, cpt=cpt)
+        try:
+            async with service.fhir_client() as http:
+                r = await http.post(f"{service.fhir_base.rstrip('/')}/Claim/$inquire", json=bundle, timeout=10,
+                                    headers={"Content-Type": FHIR_JSON, "Accept": FHIR_JSON,
+                                             "Authorization": f"Bearer {service.fhir_token}"})
+        except Exception as exc:  # noqa: BLE001
+            raise RailUnavailable(f"unreachable ({type(exc).__name__})") from exc
+        if r.status_code != 200:
+            raise RailUnavailable(f"HTTP {r.status_code}")
+        code, outcome = read_review_action(r.json())
+        if not code:
+            raise RailUnavailable("response had no reviewAction")
+        return {"review": code, "summary": f"POST Claim/$inquire → HTTP 200, ClaimResponse outcome {outcome}, "
+                                           f"reviewAction {code}"}
 
 
 class X12PARail:
-    """X12 278 request/response (Health Care Services Review), heavily simplified."""
+    """X12 278 request/response (Health Care Services Review). Simulated: production goes through a
+    clearinghouse, whose APIs differ per vendor."""
     id = "x12_278"
-    label = "X12 278 inquiry"
+    label = "X12 278 inquiry (simulated clearinghouse)"
 
-    def inquire(self, auth: dict[str, Any], auth_number: str) -> dict[str, Any]:
+    async def inquire(self, service: "PayorService", *, auth_number: str, **_: Any) -> dict[str, Any]:
+        auth = service.data["auths"][auth_number]
         req = f"ST*278*0001~BHT*0007*13~HL*1**20*1~NM1*X3*2*BRIGHTLINE~REF*BB*{auth_number}~SE*6*0001~"
         resp = f"ST*278*0002~HCR*{auth['review']}*{auth_number}~SE*3*0002~"
-        return {"request": req, "response": resp, "summary": f"278 inquiry for {auth_number} → HCR*{auth['review']}"}
+        return {"review": auth["review"], "request": req, "response": resp,
+                "summary": f"278 inquiry for {auth_number} → HCR*{auth['review']}"}
 
 
 class X12EligibilityRail:
-    """X12 270 request answered by a 271, heavily simplified."""
+    """X12 270 request answered by a 271. Simulated, as above."""
     id = "x12_270"
-    label = "X12 270/271 eligibility"
+    label = "X12 270/271 eligibility (simulated clearinghouse)"
 
     def inquire(self, member_id: str, member: dict[str, Any], service_type: str) -> dict[str, Any]:
         eb = "1" if member["active"] else "6"  # EB01: 1 active coverage, 6 inactive
@@ -139,7 +158,7 @@ class X12EligibilityRail:
                 "summary": f"270 for {member_id} → 271 EB*{eb}"}
 
 
-RAILS: dict[str, Any] = {"fhir_pas": FhirPasRail(), "x12_278": X12PARail(), "x12_270": X12EligibilityRail()}
+RAILS: dict[str, Any] = {"fhir_pas": FhirHttpRail(), "x12_278": X12PARail(), "x12_270": X12EligibilityRail()}
 
 
 class PayorService:
@@ -150,6 +169,11 @@ class PayorService:
         # e.g. {"MA": {"pa_status": ["fhir_pas", "x12_278"], "eligibility": ["x12_270"]}, ...}
         self.rails_by_plan = rails_by_plan or {}
         self.on_write = on_write
+        # FHIR PA API connection, wired by the app (bundled PAS server, or a real one from env)
+        self.fhir_client: Callable[[], Any] | None = None
+        self.fhir_base = ""
+        self.fhir_token = ""
+        self.fhir_down = False  # demo switch for the bundled server
         self.reset()
 
     def reset(self) -> None:
@@ -187,7 +211,7 @@ class PayorService:
 
     # ------------------------------------------------------------------ provider-specific
 
-    def pa_status(self, caller: Caller, auth_number: str, member_id: str, member_dob: str) -> dict:
+    async def pa_status(self, caller: Caller, auth_number: str, member_id: str, member_dob: str) -> dict:
         auth = self.data["auths"].get(str(auth_number))
         member = self.data["members"].get(str(member_id))
         # Same answer whether the auth doesn't exist, belongs to another provider, or the member details
@@ -203,25 +227,34 @@ class PayorService:
             if rail is None:
                 trace.append(f"{rail_id}: unknown rail")
                 continue
-            res = rail.inquire(auth, auth_number)
+            try:
+                res = await rail.inquire(self, auth_number=auth_number, member_id=member_id, member_dob=member_dob,
+                                         npi=auth["npi"], cpt=auth["cpt"])
+            except RailUnavailable as exc:
+                trace.append(f"{rail.label}: unavailable, {exc}")
+                continue
             trace.append(f"{rail.label}: {res['summary']}")
-            label = REVIEW.get(auth["review"], auth["review"])
+            review = res["review"]
+            label = REVIEW.get(review, review)
             dates = (f" Valid {_date(auth['valid_from'])} to {_date(auth['valid_to'])}."
-                     if auth["valid_from"] else "")
+                     if auth["valid_from"] and review == "A1" else "")
             detail = f" {auth['note']}" if auth["note"] else ""
-            self._record(caller, "pa_status", auth=auth_number, rail=rail.id, plan=plan)
+            self._record(caller, "pa_status", auth=auth_number, rail=rail.id, plan=plan,
+                         fell_back=len(trace) > 1)
             return {"status": "ok", "auth_number": auth_number, "member": _mask(member["name"]),
                     "plan": PLAN_NAMES[plan], "service": f"{auth['service']} (CPT {auth['cpt']})",
-                    "units": auth["units"], "review_code": auth["review"], "status_label": label,
+                    "units": auth["units"], "review_code": review, "status_label": label,
                     "valid": dates.strip(), "action_needed": auth["note"], "rail": rail.id, "rail_label": rail.label,
                     "rail_trace": trace, "diagnosis": auth["diagnosis"],  # dropped by the data guard
                     "message": f"{auth_number} for {auth['service']} is {label}.{dates}{detail}"}
-        trace.append(f"No electronic PA inquiry for {PLAN_NAMES[plan]}")
+        trace.append(f"No electronic PA inquiry answered for {PLAN_NAMES[plan]}")
         self._record(caller, "pa_status_handoff", auth=auth_number, plan=plan)
+        no_rail = not self._rails(plan, "pa_status")
         return {"status": "needs_human", "auth_number": auth_number, "plan": PLAN_NAMES[plan], "rail": "human",
                 "rail_trace": trace, "response_hours": 8,
-                "message": f"{PLAN_NAMES[plan]} has no electronic PA inquiry, so a provider-services "
-                           f"representative will look up {auth_number}."}
+                "message": (f"{PLAN_NAMES[plan]} has no electronic PA inquiry" if no_rail else
+                            f"None of {PLAN_NAMES[plan]}'s electronic rails answered")
+                           + f", so a provider-services representative will look up {auth_number}."}
 
     def eligibility(self, caller: Caller, member_id: str, member_dob: str, service_type: str = "30") -> dict:
         member = self.data["members"].get(str(member_id))

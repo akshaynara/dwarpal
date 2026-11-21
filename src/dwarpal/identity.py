@@ -270,11 +270,14 @@ class TrustStore:
 class NonceCache:
     """Remembers seen request nonces for the proof window (replay protection)."""
 
-    def __init__(self, window_seconds: int = 120):
+    def __init__(self, window_seconds: int = 120, store: Any = None):
         self.window = window_seconds
         self._seen: dict[str, float] = {}
+        self.store = store  # persists seen nonces so a restart doesn't reopen the replay window
 
     def check_and_add(self, nonce: str, now: float) -> bool:
+        if self.store is not None:
+            return not self.store.seen_nonce(nonce, now, self.window)
         cutoff = now - self.window
         if len(self._seen) > 10_000:
             self._seen = {n: t for n, t in self._seen.items() if t > cutoff}
@@ -342,6 +345,23 @@ class IdentityVerifier:
             expires_at=int(claims.get("exp", 0)),
             claims=claims,
         )
+
+    def verify_http_signature(self, agent: VerifiedAgent, result: dict[str, Any], passport: str,
+                              now: float | None = None) -> None:
+        """Accept an RFC 9421 signature the HTTP middleware already checked (signature, digest, freshness),
+        once the passport itself is verified: same passport, its bound key, and an unseen nonce."""
+        import hashlib
+
+        now = time.time() if now is None else now
+        if not result.get("valid"):
+            raise IdentityError(str(result.get("error", "bad_signature")),
+                                str(result.get("message", "HTTP message signature rejected.")))
+        if result.get("passport_sha") != hashlib.sha256(passport.encode()).hexdigest():
+            raise IdentityError("key_mismatch", "The request was signed under a different passport.")
+        if result.get("kid") != (agent.claims.get("cnf") or {}).get("kid"):
+            raise IdentityError("key_mismatch", "Request was signed by a key the passport does not bind.")
+        if not self.nonces.check_and_add(f"httpsig:{result.get('nonce')}", now):
+            raise IdentityError("replay", "This exact signed request was already used (replay).")
 
     def verify_proof(self, agent: VerifiedAgent, proof: str | None, body: Any, now: float | None = None) -> None:
         now = time.time() if now is None else now

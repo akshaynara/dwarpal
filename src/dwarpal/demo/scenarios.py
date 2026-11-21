@@ -67,6 +67,7 @@ class Stage:
     approve: Callable[[str, list[str]], dict[str, Any]]
     join: Callable[[str], dict[str, Any]]
     ivr: IVR | None = None
+    service: Any = None  # the business's own systems, for scenarios that simulate an outage
 
 
 @dataclass
@@ -273,15 +274,12 @@ async def forged(st: Stage, tag: str):
 
 async def replay(st: Stage, tag: str):
     riya, s = st.callers["riya"], new_session("replay")
-    captured = riya.prepare(intent="appointment_status", params={"appointment_id": "APT-501"}, session=s, tag=tag)
-    first = await riya.deliver(captured)
-    again = await riya.deliver(captured)
-    tampered = riya.prepare(intent="appointment_status", params={"appointment_id": "APT-501"}, session=s, tag=tag)
-    tampered.parts[-1].data.struct_value["params"]["appointment_id"] = "APT-777"  # edited in flight
-    edited = await riya.deliver(tampered)
-    return [("Legitimate signed request", first),
-            ("Attacker replays the captured request byte for byte", again),
-            ("Attacker edits a signed request in flight (APT-501 → APT-777)", edited)]
+    first = await riya.send(intent="appointment_status", params={"appointment_id": "APT-501"}, session=s, tag=tag)
+    again = await riya.replay_last()
+    edited = await riya.replay_last(tamper=lambda body: body.replace(b"APT-501", b"APT-777"))
+    return [("Legitimate request, signed with RFC 9421 HTTP Message Signatures", first),
+            ("Attacker replays the captured HTTP request byte for byte", again),
+            ("Attacker edits the captured request in flight (APT-501 → APT-777)", edited)]
 
 
 async def dispute(st: Stage, tag: str):

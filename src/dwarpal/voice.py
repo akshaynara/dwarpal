@@ -150,9 +150,21 @@ class LaneCode:
 
 
 class LaneService:
-    def __init__(self, policy: VoicePolicy):
+    COLL = "lanes"
+
+    def __init__(self, policy: VoicePolicy, store: Any = None):
         self.policy = policy
+        self.store = store
         self.codes: dict[str, LaneCode] = {}
+        if store is not None:
+            for d in store.all(self.COLL):
+                d.pop("spoken", None)
+                lc = LaneCode(**d)
+                self.codes[lc.code] = lc
+
+    def _save(self, lc: LaneCode) -> None:
+        if self.store is not None:
+            self.store.put(self.COLL, lc.code, asdict(lc))
 
     def offer(self, *, call_id: str, principal_id: str, principal_name: str, pending: dict[str, Any] | None,
               earlier: list[dict[str, Any]], now: float | None = None) -> LaneCode:
@@ -161,12 +173,14 @@ class LaneService:
         for c in self.codes.values():
             if c.call_id == call_id and c.used_by is None and now <= c.expires_at:
                 c.pending = pending or c.pending
+                self._save(c)
                 return c
         code = "".join(secrets.choice(LANE_ALPHABET) for _ in range(6))
         lc = LaneCode(code=code, call_id=call_id, principal_id=principal_id, principal_name=principal_name,
                       created_at=now, expires_at=now + self.policy.lane_code_ttl_seconds, pending=pending,
                       earlier=list(earlier)[-10:])
         self.codes[code] = lc
+        self._save(lc)
         return lc
 
     def redeem(self, code: str, *, principal_id: str, agent_id: str,
@@ -183,6 +197,7 @@ class LaneService:
         if lc.principal_id and lc.principal_id != principal_id:
             return "mismatch", lc
         lc.used_by, lc.used_at = agent_id, now
+        self._save(lc)
         return "ok", lc
 
     def list(self) -> list[dict[str, Any]]:
@@ -190,3 +205,5 @@ class LaneService:
 
     def clear(self) -> None:
         self.codes.clear()
+        if self.store is not None:
+            self.store.clear(self.COLL)

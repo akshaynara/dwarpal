@@ -19,6 +19,7 @@ from a2a.server.events import EventQueue
 from a2a.types import (
     AgentCapabilities,
     AgentCard,
+    AgentExtension,
     AgentInterface,
     AgentProvider,
     AgentSkill,
@@ -27,8 +28,13 @@ from a2a.types import (
     SecurityScheme,
 )
 from google.protobuf.json_format import MessageToDict
+from google.protobuf.struct_pb2 import Struct
+
+# The Dwarpal agent-passport extension. The URI points at its specification.
+EXTENSION_URI = "https://github.com/akshaynara/dwarpal/blob/main/docs/extension-agent-passport.md"
 
 from .gateway import Gateway, InboundRequest
+from .httpsig import INTERNAL_HEADER, passport_from_authorization, read_internal
 from .policy import Policy
 
 
@@ -53,10 +59,18 @@ def parse_a2a_request(ctx: RequestContext) -> InboundRequest:
     if not passport and auth.lower().startswith("agentpassport "):
         passport = auth.split(" ", 1)[1].strip()
     proof = meta.get("dwarpal_proof") or headers.get("x-dwarpal-proof")
+    http_sig = read_internal(headers.get(INTERNAL_HEADER))
+    if http_sig is not None and passport != passport_from_authorization(headers.get("authorization")):
+        # Signed under the header passport; the metadata passport must be the same token.
+        http_sig = {**http_sig, "passport_sha": "mismatch"}
+    try:
+        extensions = list(ctx.requested_extensions or []) + list(msg.extensions)
+    except Exception:  # noqa: BLE001
+        extensions = list(msg.extensions)
     return InboundRequest(session_id=ctx.context_id or "no-context", body=envelope, text=text,
                           passport=passport, proof=proof, step_up=meta.get("dwarpal_step_up"),
-                          lane_code=meta.get("dwarpal_lane_code"),
-                          tag=meta.get("dwarpal_tag"))
+                          lane_code=meta.get("dwarpal_lane_code"), http_sig=http_sig,
+                          extensions=sorted(set(extensions)), tag=meta.get("dwarpal_tag"))
 
 
 class GatewayExecutor(AgentExecutor):
@@ -89,6 +103,30 @@ class GatewayExecutor(AgentExecutor):
         return None
 
 
+def passport_extension(policy: Policy, catalog: list[dict[str, Any]]) -> AgentExtension:
+    params = Struct()
+    params.update({
+        "version": "1",
+        "audience": policy.business_id,
+        "trusted_issuers": [i.get("id") for i in policy.trusted_issuers],
+        "passport": {"header": "Authorization: AgentPassport <jws>", "metadata_key": "dwarpal_passport",
+                     "typ": "agent-passport+jwt", "alg": "EdDSA"},
+        "request_signing": {"profile": "RFC 9421", "alg": "ed25519", "tag": "dwarpal-agent",
+                            "covered": ["@method", "@authority", "@path", "content-digest", "content-type",
+                                        "authorization"],
+                            "fallback": "dwarpal_proof metadata (agent-proof+jwt)"},
+        "metadata_keys": ["dwarpal_passport", "dwarpal_step_up", "dwarpal_lane_code", "dwarpal_proof"],
+        "tiers": {i["intent"]: i["tier"] for i in catalog},
+        "step_up": {"required_strength": policy.step_up.required_strength, "resend_with": "dwarpal_step_up"},
+    })
+    return AgentExtension(
+        uri=EXTENSION_URI,
+        description="Dwarpal agent passport: who the agent acts for (signed passport), proof of possession "
+                    "(RFC 9421 request signatures), action tiers, customer step-up and lane codes. Needed for "
+                    "account and binding actions; open actions work without it.",
+        required=False, params=params)
+
+
 def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, Any]]) -> AgentCard:
     return AgentCard(
         name=f"{policy.business_name} (via Dwarpal)",
@@ -96,11 +134,11 @@ def build_agent_card(policy: Policy, public_url: str, catalog: list[dict[str, An
                      "account actions need a Dwarpal agent passport from a trusted issuer with every request "
                      "signed, binding actions also need the customer's own approval, and contested matters go "
                      "to a person. Structured intents only."),
-        version="0.4.0",
+        version="1.0.0",
         provider=AgentProvider(organization=policy.business_name, url=public_url),
         supported_interfaces=[AgentInterface(url=f"{public_url.rstrip('/')}/a2a", protocol_binding="JSONRPC",
                                              protocol_version="1.0")],
-        capabilities=AgentCapabilities(streaming=False),
+        capabilities=AgentCapabilities(streaming=False, extensions=[passport_extension(policy, catalog)]),
         security_schemes={
             "agentPassport": SecurityScheme(http_auth_security_scheme=HTTPAuthSecurityScheme(
                 scheme="AgentPassport", bearer_format="agent-passport+jwt",
